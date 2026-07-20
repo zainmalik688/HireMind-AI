@@ -1,50 +1,66 @@
 import io
-from pypdf import PdfReader
-from fastapi import HTTPException, status
-from app.api.utils.text_cleaner import TextCleaner
+from pathlib import Path
+import fitz  # PyMuPDF
+import docx
 
-class PDFService:
-    MAX_FILE_SIZE_MB = 10
-    
-    @classmethod
-    def extract_text(cls, file_bytes: bytes, filename: str) -> str:
-        # File Size Validation
-        if len(file_bytes) > cls.MAX_FILE_SIZE_MB * 1024 * 1024:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"File exceeds the maximum limit of {cls.MAX_FILE_SIZE_MB}MB."
-            )
-            
-        try:
-            reader = PdfReader(io.BytesIO(file_bytes))
-            
-            # Check for Encryption
-            if reader.is_encrypted:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Password-protected PDFs are not supported."
-                )
-                
-            extracted_text = ""
-            for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    extracted_text += page_text + "\n"
-                    
-            cleaned_text = TextCleaner.clean_resume_text(extracted_text)
-            
-            if not cleaned_text:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="The uploaded PDF appears to be empty or contains unscannable image-only content."
-                )
-                
-            return cleaned_text
-            
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to process the PDF document safely: {str(e)}"
-            )
+
+def extract_text_from_pdf(file_input) -> str:
+    """Extract raw text from a PDF (accepts bytes or Path)."""
+    text_content = []
+    try:
+        if isinstance(file_input, bytes):
+            doc = fitz.open(stream=file_input, filetype="pdf")
+        else:
+            doc = fitz.open(file_input)
+
+        with doc:
+            for page in doc:
+                text = page.get_text("text")
+                if text:
+                    text_content.append(text)
+    except Exception as err:
+        raise ValueError(f"Failed to parse PDF document: {str(err)}") from err
+
+    extracted_text = "\n".join(text_content).strip()
+    if not extracted_text:
+        raise ValueError("The PDF document contains no readable text or is image-only.")
+
+    return extracted_text
+
+
+def extract_text_from_docx(file_input) -> str:
+    """Extract raw text from a DOCX document (accepts bytes or Path)."""
+    try:
+        if isinstance(file_input, bytes):
+            doc = docx.Document(io.BytesIO(file_input))
+        else:
+            doc = docx.Document(file_input)
+
+        paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    except Exception as err:
+        raise ValueError(f"Failed to parse DOCX document: {str(err)}") from err
+
+    extracted_text = "\n".join(paragraphs).strip()
+    if not extracted_text:
+        raise ValueError("The DOCX document contains no readable text.")
+
+    return extracted_text
+
+
+def extract_text_from_file(file_input, filename: str = "") -> str:
+    """
+    Extract text from supported document formats (.pdf, .docx).
+    Accepts raw bytes with filename OR a Path object.
+    """
+    if isinstance(file_input, (str, Path)):
+        path = Path(file_input)
+        suffix = path.suffix.lower()
+    else:
+        suffix = Path(filename).suffix.lower()
+
+    if suffix == ".pdf":
+        return extract_text_from_pdf(file_input)
+    elif suffix == ".docx":
+        return extract_text_from_docx(file_input)
+    else:
+        raise ValueError(f"Unsupported file format: '{suffix}'. Supported formats: .pdf, .docx")
