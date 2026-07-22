@@ -226,15 +226,24 @@ class EntityExtractor:
                     "dates": ""
                 }
             elif current_edu:
+                # 1. Extract CGPA if present on this line
                 if cgpa_match and not current_edu["cgpa"]:
                     current_edu["cgpa"] = cgpa_match.group(1)
+
+                # 2. Extract Institution if keywords match (independent check)
+                if any(kw.lower() in line_lower for kw in inst_keywords) and not current_edu["institution"]:
+                    clean_inst = re.sub(cgpa_pattern, '', line, flags=re.IGNORECASE).strip()
+                    clean_inst = re.sub(r'\b(20\d{2}|19\d{2})\b', '', clean_inst)
+                    current_edu["institution"] = re.sub(r'\s+', ' ', clean_inst).strip(' -·,')
+
+                # 3. Extract Dates if present (independent check)
                 elif re.search(r'\b(20\d{2}|19\d{2})\b', line) and not current_edu["dates"]:
                     current_edu["dates"] = re.sub(r'\s+', ' ', line).strip()
-                elif any(kw.lower() in line_lower for kw in inst_keywords):
-                    clean_inst = re.sub(cgpa_pattern, '', line, flags=re.IGNORECASE).strip()
-                    current_edu["institution"] = re.sub(r'\s+', ' ', clean_inst)
+
+                # 4. Fallback for institution if no keyword match occurred yet
                 elif not current_edu["institution"] and not in_coursework_block and not re.search(r'\b(20\d{2}|19\d{2})\b', line):
-                    current_edu["institution"] = re.sub(r'\s+', ' ', line)
+                    clean_inst = re.sub(cgpa_pattern, '', line, flags=re.IGNORECASE).strip()
+                    current_edu["institution"] = re.sub(r'\s+', ' ', clean_inst).strip(' -·,')
 
         if current_edu:
             edu_entries.append(current_edu)
