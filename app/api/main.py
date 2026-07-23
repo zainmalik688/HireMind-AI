@@ -1,9 +1,11 @@
 from dotenv import load_dotenv
 load_dotenv()  # Must run before importing services using env vars
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, status
+import json
+from typing import Optional
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
 from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware  # Fixed capitalization
 
 # V2 Schemas & Services
 from app.api.schemas import ParsedResumeData
@@ -12,16 +14,16 @@ from app.api.services.parsing_service import ResumeParsingEngine
 from app.api.services.extractor import EntityExtractor
 from app.api.services.classifier_service import ResumeClassifierService
 
-# V1 Legacy Services
+# V1/V3 Services
 from app.api.services.pdf_service import extract_text_from_file
 from app.api.services.ai_service import analyze_resume_text
 
 app = FastAPI(
     title="HireMind AI - Resume Intelligence Engine",
-    version="2.0.0"
+    version="3.0.0"
 )
 
-# Enable CORS for frontend integration
+# Enable CORS for Streamlit / Frontend integration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,6 +35,7 @@ app.add_middleware(
 @app.get("/")
 def root():
     return {"status": "online", "message": "HireMind AI API Engine is running"}
+
 
 # --- VERSION 2 ENDPOINTS ---
 
@@ -103,10 +106,17 @@ async def parse_resume(file: UploadFile = File(...)):
     return response_dict
 
 
-# --- VERSION 1 LEGACY ENDPOINTS ---
+# --- VERSION 3 ANALYSIS ENDPOINT ---
 
-@app.post("/analyze", tags=["V1 Analysis"])
-async def analyze_resume(file: UploadFile = File(...)):
+@app.post("/analyze", tags=["V3 Production Engine"])
+async def analyze_resume(
+    file: UploadFile = File(...),
+    target_role: Optional[str] = Form(None)
+):
+    """
+    Performs evidence-grounded FAANG recruiter audit using Groq Llama-3.3-70b.
+    Accepts resume file and an optional target_role string from Form data.
+    """
     if not file.filename or not file.filename.lower().endswith(('.pdf', '.docx')):
         raise HTTPException(status_code=400, detail="Only PDF and DOCX files are supported.")
     
@@ -114,7 +124,7 @@ async def analyze_resume(file: UploadFile = File(...)):
         file_bytes = await file.read()
         extracted_result = extract_text_from_file(file_bytes, file.filename)
         
-        # Guard against dict output from extract_text_from_file
+        # Safe extraction for both dict and string outputs from text service
         if isinstance(extracted_result, dict):
             extracted_text = (
                 extracted_result.get("cleaned_text") 
@@ -128,13 +138,26 @@ async def analyze_resume(file: UploadFile = File(...)):
         if not extracted_text or not extracted_text.strip():
             raise HTTPException(status_code=400, detail="Could not extract readable text from the document.")
             
-        analysis = await analyze_resume_text(extracted_text)
+        # Execute Groq V3 Recruiter Intelligence Audit
+        raw_analysis = await analyze_resume_text(text=extracted_text, target_role=target_role)
 
-        # Guard against dict output from analyze_resume_text
-        if isinstance(analysis, dict):
-            analysis = analysis.get("analysis", str(analysis))
+        # Ensure return payload is cleanly parsed as a native JSON dict
+        if isinstance(raw_analysis, str):
+            clean_json_str = raw_analysis.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            try:
+                analysis_dict = json.loads(clean_json_str)
+            except json.JSONDecodeError:
+                analysis_dict = {"raw_output": raw_analysis}
+        elif isinstance(raw_analysis, dict):
+            analysis_dict = raw_analysis.get("analysis", raw_analysis)
+        else:
+            analysis_dict = {}
 
-        return {"filename": file.filename, "analysis": analysis}
+        return {
+            "filename": file.filename, 
+            "status": "success", 
+            "analysis": analysis_dict
+        }
         
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
