@@ -1,3 +1,11 @@
+import os
+
+# --- CRITICAL: PREVENT OPENBLAS / NUMPY MEMORY ALLOCATION CRASHES ---
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+
 from dotenv import load_dotenv
 load_dotenv()  # Must run before importing services using env vars
 
@@ -5,7 +13,7 @@ import json
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
 from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware  # Fixed capitalization
+from fastapi.middleware.cors import CORSMiddleware
 
 # V2 Schemas & Services
 from app.api.schemas import ParsedResumeData
@@ -114,7 +122,7 @@ async def analyze_resume(
     target_role: Optional[str] = Form(None)
 ):
     """
-    Performs evidence-grounded FAANG recruiter audit using Groq Llama-3.3-70b.
+    Performs evidence-grounded FAANG recruiter audit using Groq Llama-3.1-8b-instant.
     Accepts resume file and an optional target_role string from Form data.
     """
     if not file.filename or not file.filename.lower().endswith(('.pdf', '.docx')):
