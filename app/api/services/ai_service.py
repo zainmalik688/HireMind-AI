@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import logging
 import json
@@ -78,6 +79,16 @@ NON-NEGOTIABLE AUDIT RULES
 
 3. GROUNDING & EVIDENCE: Every claim (skills, metrics, gaps) MUST cite direct quotes from the resume text. If something is absent, explicitly write "Not Found in Resume" or detail the exact gap.
 
+3A. KEYWORD GROUNDING & TAXONOMY MANDATE (CRITICAL — applies to `ats_keyword_analysis`):
+   - Before adding ANY term to `missing_keywords`, re-scan the full resume text (case-insensitive) for that exact term AND its common aliases/abbreviations (e.g., "K8s" = "Kubernetes", "AWS" = "Amazon Web Services", "CV" = "Computer Vision" in an ML context). If the term or a clear alias appears anywhere in the resume text — in a skills list, a project bullet, a tool stack line, anywhere — it is FORBIDDEN to list it in `missing_keywords`. It belongs in `strong_keywords` (or `overused_keywords` if genuinely repeated excessively) instead.
+   - `missing_keywords` may ONLY contain terms that are genuinely absent from the entire resume text. Do not infer a tool is "probably missing" from context; verify its literal absence.
+   - `keyword_taxonomy` MUST be populated by sorting every keyword you reference anywhere in `strong_keywords`, `missing_keywords`, or `suggested_keywords` into exactly one of its four categories:
+     * `languages`: programming, query, or markup languages only (Python, SQL, C++, etc.) — never tools.
+     * `frameworks`: frameworks, libraries, and platforms (PyTorch, FastAPI, TensorFlow, React, etc.).
+     * `mlops`: MLOps/DevOps/infrastructure tooling (Docker, Kubernetes, Git, Linux, CI/CD, AWS, GCP, etc.).
+     * `domain_specializations`: domain-specific subfields (Computer Vision, NLP, Radiology Imaging, Recommender Systems, etc.).
+   - A keyword must appear in exactly one taxonomy category — no duplicates across categories.
+
 4. STRICT SCORING MATHEMATICAL ALIGNMENT (CRITICAL):
    - Scores MUST strictly match the identified red flags for the targeted track. Do NOT give scores above 80/100 if major core gaps exist.
    - DEDUCTION MATRIX:
@@ -138,6 +149,12 @@ NON-NEGOTIABLE AUDIT RULES
 9. DEPTH & LENGTH MANDATES:
    - EXECUTIVE SUMMARY: 2-3 detailed paragraphs analyzing positioning, target market fit, exact strengths, and critical red flags. If DOMAIN_MISMATCH = TRUE, the summary MUST state the mismatch plainly in the first paragraph and name PIVOT_ROLE by the end of the summary.
    - TOP 10 HIGHEST ROI IMPROVEMENTS: Exactly 10 distinct, non-overlapping, highly specific items. Under DOMAIN_MISMATCH, item 1 is the fixed override row (Rule 2A-c) and items 2-10 must still meet full specificity standards.
+
+10. COMPLETE PROJECT COVERAGE MANDATE (CRITICAL — NO SKIPPING):
+   - First, silently enumerate every distinct project, capstone, thesis, or substantial technical build mentioned anywhere in the resume text (Projects section, Experience section, Publications, README/portfolio links, etc.). Treat each one as a separate unit of work even if the resume groups several under one heading.
+   - `individual_project_reviews` MUST contain EXACTLY ONE entry for EVERY project identified in that enumeration — never a subset, never just the first 2-3, regardless of how many there are (5, 7, 10+). Omitting a project that appears in the resume text is a critical audit failure, equivalent to fabricating a weakness.
+   - Do NOT silently drop, merge unrelated projects together, or truncate the array to save space. If there are many projects, keep each individual review CONCISE (2-4 sentences per prose field) rather than omitting projects — completeness of coverage takes priority over per-project verbosity.
+   - Process projects in the exact order they appear in the resume text, so coverage can be verified against the source document.
 
 =========================================================
 REQUIRED JSON OUTPUT SCHEMA
@@ -258,7 +275,13 @@ You MUST respond ONLY with a valid single JSON object (no markdown formatting, n
     "strong_keywords": ["Keyword 1", "Keyword 2", "Keyword 3", "Keyword 4", "Keyword 5"],
     "missing_keywords": ["Missing 1", "Missing 2", "Missing 3", "Missing 4", "Missing 5"],
     "overused_keywords": ["Overused 1", "Overused 2", "Overused 3"],
-    "suggested_keywords": ["Suggested 1", "Suggested 2", "Suggested 3", "Suggested 4", "Suggested 5"]
+    "suggested_keywords": ["Suggested 1", "Suggested 2", "Suggested 3", "Suggested 4", "Suggested 5"],
+    "keyword_taxonomy": {
+      "languages": ["Python", "SQL"],
+      "frameworks": ["PyTorch", "FastAPI"],
+      "mlops": ["Docker", "Git", "Linux", "AWS"],
+      "domain_specializations": ["Computer Vision", "NLP"]
+    }
   },
   "technical_skill_analysis": {
     "verified_strong_skills": ["Verified Skill 1", "Verified Skill 2"],
@@ -275,6 +298,7 @@ You MUST respond ONLY with a valid single JSON object (no markdown formatting, n
     ]
   },
   "individual_project_reviews": [
+    // REMINDER (per Rule 10): output ONE object like this for EVERY project found in the resume text, not just the first few. Do not stop early.
     {
       "project_name": "Project Name",
       "difficulty": "High | Medium | Low",
@@ -342,6 +366,50 @@ You MUST respond ONLY with a valid single JSON object (no markdown formatting, n
 }
 """
 
+def _apply_keyword_grounding_fix(analysis_dict: dict, resume_text: str) -> dict:
+    """
+    Deterministic safety net for Problem 3 (false-negative keyword deductions).
+
+    Rule 3A in the system prompt asks the model to verify a keyword's absence
+    before flagging it as missing, but prompt instructions are best-effort, not
+    a guarantee. This function re-checks every entry in
+    ats_keyword_analysis.missing_keywords against the literal resume_text using
+    a case-insensitive, word-boundary-aware match (so "Git" doesn't accidentally
+    match inside "Digital", for example). Anything that genuinely appears in the
+    resume is moved out of missing_keywords and into strong_keywords, overriding
+    whatever the model claimed. Nothing else in the payload is touched.
+    """
+    kw_section = analysis_dict.get("ats_keyword_analysis")
+    if not isinstance(kw_section, dict) or not resume_text:
+        return analysis_dict
+
+    text_lower = resume_text.lower()
+    missing = kw_section.get("missing_keywords") or []
+    strong = kw_section.get("strong_keywords") or []
+
+    corrected_missing: list = []
+    corrected_strong: list = list(strong)
+
+    for keyword in missing:
+        if not isinstance(keyword, str) or not keyword.strip():
+            continue
+        term = keyword.strip().lower()
+        # Word-boundary-safe pattern: treats '.', '+', '#', '-' as part of the
+        # token (so "C++", "C#", "CI/CD" etc. still match correctly) without
+        # matching a substring inside an unrelated longer word.
+        pattern = r'(?<![\w.+#])' + re.escape(term) + r'(?![\w.+#])'
+        if re.search(pattern, text_lower):
+            if keyword not in corrected_strong:
+                corrected_strong.append(keyword)
+        else:
+            corrected_missing.append(keyword)
+
+    kw_section["missing_keywords"] = corrected_missing
+    kw_section["strong_keywords"] = corrected_strong
+    analysis_dict["ats_keyword_analysis"] = kw_section
+    return analysis_dict
+
+
 async def analyze_resume_text(text: str, target_role: str = None, max_retries: int = 3) -> str:
     """Sends extracted resume text to Gemini for Production FAANG Analysis."""
     if not text or not text.strip():
@@ -366,6 +434,7 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
                     response_mime_type="application/json",
                     response_schema=sanitized_schema,  # <--- Cleaned schema satisfies Gemini Developer API mode
                     temperature=0.1,
+                    max_output_tokens=8192,  # <--- Explicit budget; prevents silent JSON truncation on resumes with many projects
                 )
             )
 
@@ -374,9 +443,10 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
             # Clean residual markdown block formatting if present
             cleaned_content = raw_content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
 
-            # Validate valid JSON prior to returning to caller
-            json.loads(cleaned_content)
-            return cleaned_content
+            # Parse, apply the deterministic keyword-grounding correction, then re-serialize
+            parsed_content = json.loads(cleaned_content)
+            parsed_content = _apply_keyword_grounding_fix(parsed_content, text)
+            return json.dumps(parsed_content)
 
         except json.JSONDecodeError as jde:
             logger.warning(f"Gemini output JSON decode attempt {attempt + 1} failed: {str(jde)}")

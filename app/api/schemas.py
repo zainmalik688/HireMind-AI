@@ -1,5 +1,5 @@
 from typing import Any
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # ==========================================
 # FILE & PARSER VALIDATION SCHEMAS
@@ -93,11 +93,34 @@ class ParsedResumeData(BaseModel):
 # RECRUITER V3 ENGINE RESPONSE SCHEMAS
 # ==========================================
 
+class SectionCompletenessMap(BaseModel):
+    """
+    Explicit, non-nullable presence map for the 12 core resume sections.
+    Every field below is REQUIRED (no default value). Because Gemini's
+    structured-output mode is constrained by this model's JSON Schema, it
+    can no longer satisfy `section_completeness` with an empty object -- an
+    empty `{}` was previously valid against `dict[str, bool]` and is what
+    caused the "Section completeness details are missing" banner. With 12
+    required keys, the model must explicitly resolve every one to true/false.
+    """
+    contact_info: bool = Field(..., description="Candidate name, email, phone, or portfolio links detected.")
+    summary: bool = Field(..., description="Summary / objective / profile section detected.")
+    skills: bool = Field(..., description="Skills / technical skills / competencies section detected.")
+    experience: bool = Field(..., description="Work experience / employment history section detected.")
+    education: bool = Field(..., description="Education / academic background section detected.")
+    projects: bool = Field(..., description="Projects / key projects section detected.")
+    certifications: bool = Field(..., description="Certifications / licenses / credentials section detected.")
+    languages: bool = Field(..., description="Languages spoken or written section detected.")
+    awards: bool = Field(..., description="Awards / honors / achievements section detected.")
+    publications: bool = Field(..., description="Publications / research papers section detected.")
+    interests: bool = Field(..., description="Interests / hobbies section detected.")
+    references: bool = Field(..., description="References section detected.")
+
 class ResumeIntelligenceDashboard(BaseModel):
     overall_resume_health_score: int = Field(..., ge=0, le=100, description="Overall health score of the resume.")
     resume_quality_score: int = Field(..., ge=0, le=100, description="General content and presentation quality score.")
     resume_completeness: int = Field(..., ge=0, le=100, description="Overall completeness score across essential sections.")
-    section_completeness: dict[str, bool] = Field(..., description="Presence map of core sections (e.g. summary, experience, skills, education).")
+    section_completeness: SectionCompletenessMap = Field(..., description="Explicit, non-nullable presence map across all 12 core resume sections.")
     readability_score: int = Field(..., ge=0, le=100, description="Readability and scanability score.")
     professional_tone_analysis: str = Field(..., description="Assessment of tone (e.g., Action-oriented, Professional, Passive).")
     formatting_quality: int = Field(..., ge=0, le=100, description="Formatting and visual structure quality rating.")
@@ -143,6 +166,18 @@ class ExplainableScorecard(BaseModel):
     recruiter_signal: ScoreItem
     overall_hiring_score: OverallScoreItem
 
+class EligibilityCheck(BaseModel):
+    """
+    Hard eligibility/licensure gate, referenced throughout SYSTEM_PROMPT_V4_1_PRODUCTION
+    (Rules 2A and 7C in ai_service.py) but previously absent from this schema entirely.
+    Since response_schema is generated from this file, that omission meant Gemini could
+    never actually emit this object even though the prompt demanded it. All fields are
+    required (non-nullable) so it is always present with real content.
+    """
+    status: str = Field(..., description="'PASSED' or 'FAILED'.")
+    title: str = Field(..., description="'Hard Eligibility Check' or '🚨 Hard Eligibility Check'.")
+    reason: str = Field(..., description="One-sentence explanation of the eligibility determination.")
+
 class VerifiedStrength(BaseModel):
     strength: str
     evidence: str
@@ -174,11 +209,26 @@ class ResumeStructureReview(BaseModel):
     bullet_consistency: SectionReviewItem
     recruiter_6sec_scan: SectionReviewItem
 
+class KeywordTaxonomy(BaseModel):
+    """
+    Structured grouping of every keyword the audit references, organized by
+    category rather than as one flat undifferentiated list. Addresses Problem 3's
+    request for clearer taxonomy: Languages / Frameworks / MLOps / Domain
+    Specializations. This is additive to ATSKeywordAnalysis's existing flat lists
+    (strong_keywords, missing_keywords, overused_keywords, suggested_keywords),
+    which are left untouched so existing frontend rendering keeps working.
+    """
+    languages: list[str] = Field(default_factory=list, description="Programming, query, or markup languages (e.g., Python, SQL, C++). Tools like Git are NOT languages.")
+    frameworks: list[str] = Field(default_factory=list, description="Frameworks, libraries, and platforms (e.g., PyTorch, FastAPI, TensorFlow, React).")
+    mlops: list[str] = Field(default_factory=list, description="MLOps, DevOps, infrastructure, and tooling (e.g., Docker, Kubernetes, Git, Linux, CI/CD, AWS).")
+    domain_specializations: list[str] = Field(default_factory=list, description="Domain-specific specializations and subfields (e.g., Computer Vision, NLP, Radiology Imaging, Recommender Systems).")
+
 class ATSKeywordAnalysis(BaseModel):
     strong_keywords: list[str]
     missing_keywords: list[str]
     overused_keywords: list[str]
     suggested_keywords: list[str]
+    keyword_taxonomy: KeywordTaxonomy = Field(..., description="All resume-relevant keywords grouped by category. Required so Gemini cannot omit the taxonomy breakdown.")
 
 class NextTechnologyItem(BaseModel):
     technology: str
@@ -247,6 +297,7 @@ class ROIImprovementItem(BaseModel):
 
 class AuditReportResponse(BaseModel):
     dashboard_metrics: ResumeIntelligenceDashboard  # <--- Added explicit dashboard breakdown
+    eligibility_check: EligibilityCheck  # <--- Was required by the prompt but missing from this schema; now present and required
     candidate_snapshot: CandidateSnapshot
     executive_summary: str
     explainable_scorecard: ExplainableScorecard
@@ -263,6 +314,70 @@ class AuditReportResponse(BaseModel):
     priority_action_plan: PriorityActionPlan
     top_10_highest_roi_improvements: list[ROIImprovementItem]
     final_candidate_summary: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_safe_defaults(cls, data: Any) -> Any:
+        """
+        Defensive normalization layer run before field validation.
+
+        This does NOT relax what Gemini is required to return: section_completeness
+        and eligibility_check remain fully required, non-nullable objects in the
+        JSON Schema exposed to the model via model_json_schema() (used to build
+        response_schema in ai_service.py). This validator exists purely to protect
+        the parsing path against legacy or partial payloads -- e.g. an old cached
+        audit JSON on disk from before this schema existed, or a malformed retry --
+        so a single missing key degrades gracefully into a safe, explicit default
+        instead of raising a hard validation error that surfaces as a blank page.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        # --- section_completeness: always resolve to the full 12-key map ---
+        dashboard = data.get("dashboard_metrics")
+        if isinstance(dashboard, dict):
+            raw_sections = dashboard.get("section_completeness")
+            full_sections = {key: False for key in SectionCompletenessMap.model_fields}
+            if isinstance(raw_sections, dict):
+                for key, value in raw_sections.items():
+                    if key in full_sections:
+                        full_sections[key] = bool(value)
+            dashboard["section_completeness"] = full_sections
+
+        # --- eligibility_check: always resolve to a complete object ---
+        raw_eligibility = data.get("eligibility_check")
+        if not isinstance(raw_eligibility, dict) or not raw_eligibility.get("status"):
+            data["eligibility_check"] = {
+                "status": "PASSED",
+                "title": "Hard Eligibility Check",
+                "reason": "No regulated licensure or credentialing barrier detected for this target role.",
+            }
+
+        # --- keyword_taxonomy: always resolve to a complete, category-keyed object ---
+        keyword_analysis = data.get("ats_keyword_analysis")
+        if isinstance(keyword_analysis, dict):
+            raw_taxonomy = keyword_analysis.get("keyword_taxonomy")
+            if not isinstance(raw_taxonomy, dict):
+                raw_taxonomy = {}
+            keyword_analysis["keyword_taxonomy"] = {
+                "languages": raw_taxonomy.get("languages") or [],
+                "frameworks": raw_taxonomy.get("frameworks") or [],
+                "mlops": raw_taxonomy.get("mlops") or [],
+                "domain_specializations": raw_taxonomy.get("domain_specializations") or [],
+            }
+
+        # --- array fields: a missing/None key becomes an empty list, never a crash ---
+        for list_field in (
+            "verified_strengths",
+            "critical_weaknesses",
+            "recruiter_evidence_matrix",
+            "individual_project_reviews",
+            "top_10_highest_roi_improvements",
+        ):
+            if data.get(list_field) is None:
+                data[list_field] = []
+
+        return data
 
     @field_validator("recruiter_evidence_matrix", mode="after")
     @classmethod

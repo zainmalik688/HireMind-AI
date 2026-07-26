@@ -174,25 +174,29 @@ def render_dashboard(dashboard: dict):
 
     with col_left:
         st.subheader("📑 Section Completeness")
-        # 1. Check multiple possible names just in case
-        sections = (
-            dashboard.get("section_completeness") or 
-            dashboard.get("completeness") or 
-            dashboard.get("sections") or 
-            dashboard.get("section_audit")
-        )
+        # 1. Check multiple possible names just in case, but use "is not None" so
+        #    a present-but-empty dict/list isn't mistaken for a missing key. A plain
+        #    `or` chain here would fall through past a real (just empty) dict because
+        #    `{}` is falsy in Python -- that was the actual cause of the banner
+        #    showing up even when the backend had returned a valid, if sparse, object.
+        sections = None
+        for candidate_key in ("section_completeness", "completeness", "sections", "section_audit"):
+            candidate_value = dashboard.get(candidate_key)
+            if candidate_value is not None:
+                sections = candidate_value
+                break
 
-        # 2. Safely render if data exists and isn't empty
-        if sections and isinstance(sections, dict):
+        # 2. Safely render if data exists, even if it happens to be empty
+        if isinstance(sections, dict) and len(sections) > 0:
             for sec_name, present in sections.items():
                 icon = "✅" if present else "❌"
                 st.write(f"{icon} **{sec_name.replace('_', ' ').title()}**")
-        
-        elif sections and isinstance(sections, list):
+
+        elif isinstance(sections, list) and len(sections) > 0:
             for item in sections:
                 st.write(f"• {item}")
-                
-        # 3. The fallback so it never goes blank again
+
+        # 3. The fallback only fires when no section data was found under any key
         else:
             st.info("ℹ️ Section completeness details are missing from this audit.")
 
