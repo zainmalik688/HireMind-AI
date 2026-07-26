@@ -70,7 +70,7 @@ st.markdown(
 
 
 # ----------------------------------------------------
-# Helper Functions: Caching, Hashing, Deduplication, & Mocking
+# Helper Functions: Caching, Hashing, Deduplication, Dashboard & Mocking
 # ----------------------------------------------------
 def calculate_file_hash(file_bytes: bytes) -> str:
     """Computes unique SHA-256 hash for uploaded file."""
@@ -112,6 +112,104 @@ def deduplicate_matrix_notes(matrix: list) -> list:
     return cleaned_matrix
 
 
+def render_dashboard(dashboard: dict):
+    """Renders the 13-Metric Resume Intelligence Dashboard."""
+    if not dashboard:
+        st.warning("⚠️ Dashboard metrics are not available for this analysis.")
+        return
+
+    st.markdown("## 📊 Resume Intelligence Dashboard")
+    st.caption("Real-time automated evaluation across 13 core performance dimensions.")
+
+    # -------------------------------------------------------------
+    # 1. TOP HIGH-LEVEL METRICS CARDS
+    # -------------------------------------------------------------
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric(
+            label="Overall Health Score", 
+            value=f"{dashboard.get('overall_resume_health_score', 0)}/100"
+        )
+    with col2:
+        st.metric(
+            label="Employability Score", 
+            value=f"{dashboard.get('employability_score', 0)}/100"
+        )
+    with col3:
+        st.metric(
+            label="Strength Rating", 
+            value=str(dashboard.get("resume_strength_rating", "N/A"))
+        )
+
+    st.divider()
+
+    # -------------------------------------------------------------
+    # 2. READINESS GAUGES (PROGRESS BARS)
+    # -------------------------------------------------------------
+    st.subheader("🎯 Career & Industry Readiness")
+    r_col1, r_col2, r_col3 = st.columns(3)
+
+    with r_col1:
+        tech_score = dashboard.get("technical_readiness", 0)
+        st.caption(f"Technical Readiness: **{tech_score}%**")
+        st.progress(max(0.0, min(1.0, float(tech_score) / 100.0)))
+
+    with r_col2:
+        ind_score = dashboard.get("industry_readiness", 0)
+        st.caption(f"Industry Readiness: **{ind_score}%**")
+        st.progress(max(0.0, min(1.0, float(ind_score) / 100.0)))
+
+    with r_col3:
+        car_score = dashboard.get("career_readiness_score", 0)
+        st.caption(f"Career Readiness: **{car_score}%**")
+        st.progress(max(0.0, min(1.0, float(car_score) / 100.0)))
+
+    st.divider()
+
+    # -------------------------------------------------------------
+    # 3. SECTION CHECKLIST & QUALITY BREAKDOWN
+    # -------------------------------------------------------------
+    col_left, col_right = st.columns([1, 1])
+
+    with col_left:
+        st.subheader("📑 Section Completeness")
+        # 1. Check multiple possible names just in case
+        sections = (
+            dashboard.get("section_completeness") or 
+            dashboard.get("completeness") or 
+            dashboard.get("sections") or 
+            dashboard.get("section_audit")
+        )
+
+        # 2. Safely render if data exists and isn't empty
+        if sections and isinstance(sections, dict):
+            for sec_name, present in sections.items():
+                icon = "✅" if present else "❌"
+                st.write(f"{icon} **{sec_name.replace('_', ' ').title()}**")
+        
+        elif sections and isinstance(sections, list):
+            for item in sections:
+                st.write(f"• {item}")
+                
+        # 3. The fallback so it never goes blank again
+        else:
+            st.info("ℹ️ Section completeness details are missing from this audit.")
+
+    with col_right:
+        st.subheader("🔍 Quality Analysis")
+        
+        with st.expander("Formatting & Readability", expanded=True):
+            st.write(f"• **Formatting Quality:** {dashboard.get('formatting_quality', 0)}/100")
+            st.write(f"• **Readability Score:** {dashboard.get('readability_score', 0)}/100")
+            st.write(f"• **Tone:** {dashboard.get('professional_tone_analysis', 'N/A')}")
+            
+        with st.expander("Content & Depth", expanded=False):
+            st.write(f"• **Quality Score:** {dashboard.get('resume_quality_score', 0)}/100")
+            st.write(f"• **Overall Completeness:** {dashboard.get('resume_completeness', 0)}/100")
+            st.write(f"• **Technical Depth:** {dashboard.get('technical_depth_analysis', 0)}/100")
+
+
 def get_mock_data():
     """Returns instant dummy data to develop UI without calling Groq API."""
     return {
@@ -120,6 +218,29 @@ def get_mock_data():
             "career_level": "Senior AI Engineer",
             "target_roles": ["Senior AI/ML Engineer"],
             "overall_hiring_recommendation": "Strong Hire (Mock Data)",
+        },
+        "dashboard_metrics": {
+            "overall_resume_health_score": 85,
+            "resume_quality_score": 88,
+            "resume_completeness": 92,
+            "section_completeness": {
+                "contact_info": True,
+                "summary": True,
+                "skills": True,
+                "experience": True,
+                "education": True,
+                "projects": True,
+                "certifications": False,
+            },
+            "readability_score": 82,
+            "professional_tone_analysis": "Highly Professional",
+            "formatting_quality": 86,
+            "technical_depth_analysis": 80,
+            "resume_strength_rating": "Strong",
+            "career_readiness_score": 87,
+            "technical_readiness": 84,
+            "industry_readiness": 89,
+            "employability_score": 88,
         },
         "explainable_scorecard": {
             "ats_score": {
@@ -254,14 +375,14 @@ st.sidebar.caption(
 # ----------------------------------------------------
 # Main UI Layout
 # ----------------------------------------------------
-st.title("⚡ HireMind AI (Version 3)")
+st.title("⚡ HireMind AI ")
 st.subheader("FAANG Senior Recruiter & ATS Intelligence System")
 
 col_file, col_role = st.columns([1.5, 1])
 with col_file:
     uploaded_file = st.file_uploader(
-        "Upload resume for evidence-based recruiter analysis (PDF or DOCX)",
-        type=["pdf", "docx"],
+        "Upload resume for evidence-based recruiter analysis (PDF, DOCX, or TXT)",
+        type=["pdf", "docx", "txt"],
     )
 with col_role:
     target_role = st.text_input(
@@ -299,18 +420,20 @@ if uploaded_file is not None:
         or (st.session_state["active_file_hash"] != file_hash)
     )
 
-    if should_trigger and (run_audit or force_reanalyze):
+    if run_audit or force_reanalyze:
         if use_mock:
             st.info("⚡ Mock Mode Active: Loading dummy dataset...")
             data = get_mock_data()
             st.session_state["active_audit"] = data
             st.session_state["active_file_hash"] = file_hash
+            st.rerun() # <--- ADDED HERE
         elif cache_file_path.exists() and not force_reanalyze:
-            st.success("⚡ Cache Hit! Loaded audit instantly from local disk.")
+            st.toast("⚡ Cache Hit! Loaded audit instantly from local disk.") # <-- Use toast so it survives the rerun!
             with open(cache_file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             st.session_state["active_audit"] = data
             st.session_state["active_file_hash"] = file_hash
+            st.rerun()
         else:
             # Live API Call
             with st.spinner("Executing deep recruiter evaluation & evidence audit..."):
@@ -335,11 +458,13 @@ if uploaded_file is not None:
                     )
 
                     if response.status_code == 200:
-                        raw_res = response.json().get("analysis", {})
-
-                        if isinstance(raw_res, dict):
-                            data = raw_res
-                        elif isinstance(raw_res, str):
+                        json_resp = response.json()
+                        
+                        # 1. Safely extract data whether it's inside an "analysis" key or not
+                        raw_res = json_resp.get("analysis", json_resp)
+                        
+                        # 2. Handle stringified JSON vs dictionary
+                        if isinstance(raw_res, str):
                             clean_str = (
                                 raw_res.strip()
                                 .removeprefix("```json")
@@ -349,16 +474,16 @@ if uploaded_file is not None:
                             )
                             data = json.loads(clean_str)
                         else:
-                            data = {}
+                            data = raw_res
 
-                        # Save response to local disk cache
+                        # 3. Save response to local disk cache
                         with open(cache_file_path, "w", encoding="utf-8") as f:
                             json.dump(data, f, indent=2)
 
+                        # 4. Trigger UI Render
                         st.session_state["active_audit"] = data
                         st.session_state["active_file_hash"] = file_hash
-                        st.success("Analysis Complete & Saved to Cache!")
-
+                        st.rerun()
                     else:
                         st.error(
                             f"Backend Server Error [{response.status_code}]:"
@@ -367,16 +492,25 @@ if uploaded_file is not None:
                 except Exception as e:
                     st.error(f"Could not connect to backend server: {str(e)}")
 
+               
+
 # Render Audit Display from Session State
 if st.session_state.get("active_audit"):
     data = st.session_state["active_audit"]
     st.markdown("---")
 
     # ----------------------------------------------------
-    # 1. Candidate Snapshot Header
+    # Safe Extraction of Dashboard Payload
+    # ----------------------------------------------------
+    analysis_payload = data.get("analysis", data) if isinstance(data, dict) else {}
+    dashboard = analysis_payload.get("dashboard_metrics", {})
+
+    # ----------------------------------------------------
+    # 1. Candidate Snapshot Header & V2 Document Classification
     # ----------------------------------------------------
     snap = data.get("candidate_snapshot") or {}
     summary_obj = data.get("overall_summary") or {}
+    val_doc = data.get("document_validation") or {}
 
     cand_name = snap.get("candidate_name") or "Candidate"
     career_lvl = snap.get("career_level") or "Mid"
@@ -387,14 +521,24 @@ if st.session_state.get("active_audit"):
         "one_line_verdict", "Strong Interview"
     )
 
+    # Version 2 Module 1: Document Classification & Confidence Badge
+    is_resume = val_doc.get("is_valid_resume", True)
+    conf_score = val_doc.get("confidence_score", 0.95)
+    class_label = "✅ Valid Resume" if is_resume else "❌ Non-Resume Document"
+    conf_pct = f"{int(conf_score * 100)}%" if isinstance(conf_score, (int, float)) else str(conf_score)
+
     st.markdown(f"### 👤 Candidate Snapshot: **{cand_name}**")
-    col_snap1, col_snap2, col_snap3 = st.columns(3)
-    col_snap1.write(f"**Career Level:** {career_lvl}")
-    col_snap2.write(
+    
+    col_snap1, col_snap2, col_snap3, col_snap4 = st.columns(4)
+    col_snap1.write(f"**Doc Type:** `{class_label}`")
+    col_snap2.write(f"**Confidence:** `{conf_pct}`")
+    col_snap3.write(f"**Career Level:** {career_lvl}")
+    col_snap4.write(f"**Verdict:** `{verdict}`")
+
+    st.write(
         "**Target Roles:**"
         f" {', '.join(deduplicate_list(target_roles)) if isinstance(target_roles, list) else target_roles}"
     )
-    col_snap3.write(f"**Overall Verdict:** `{verdict}`")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -537,13 +681,17 @@ if st.session_state.get("active_audit"):
     # ----------------------------------------------------
     # 4. Tabbed Deep Dive
     # ----------------------------------------------------
-    tab_exec, tab_tech, tab_projects, tab_bench, tab_action = st.tabs([
+    tab_dash, tab_exec, tab_tech, tab_projects, tab_bench, tab_action = st.tabs([
+        "📊 Intelligence Dashboard",
         "📋 Executive Summary & ATS",
         "💻 Technical & ATS Keywords",
         "🚀 Project Audits & STAR Rewrites",
         "📊 Benchmark & Risk Assessment",
         "🎯 Action Plan & Top 10 ROI",
     ])
+
+    with tab_dash:
+        render_dashboard(dashboard)
 
     with tab_exec:
         st.markdown("### Executive Recruiter Summary")
@@ -685,10 +833,8 @@ if st.session_state.get("active_audit"):
             "**vs. FAANG-Level Applicant:**"
             f" `{bench.get('faang_level_comparison', 'Average')}`"
         )
-        st.write(
-            "**Qualitative Assessment:**"
-            f" {bench.get('qualitative_summary', 'Demonstrates strong foundational deep learning skills.')}"
-        )
+        qualitative_text = str(bench.get('qualitative_summary', 'Demonstrates strong foundational deep learning skills.')).strip()
+        st.markdown(f"**Qualitative Assessment:** {qualitative_text}")
 
         st.markdown("### Hiring Risk Assessment")
         risk = data.get("hiring_risk_assessment") or {}

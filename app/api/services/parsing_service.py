@@ -36,7 +36,7 @@ class ResumeParsingEngine:
     @staticmethod
     def _clean_extracted_text(text: str) -> str:
         """
-        Normalizes extracted resume text across PDF and DOCX formats.
+        Normalizes extracted resume text across PDF, DOCX, and TXT formats.
         Fixes split-word hyphens, standardizes line breaks, and preserves structural sections.
         """
         if not text:
@@ -50,6 +50,44 @@ class ResumeParsingEngine:
         text = re.sub(r'[ \t]+', ' ', text)
 
         return text.strip()
+
+    @classmethod
+    def get_section_completeness_flags(cls, text: str) -> dict[str, bool]:
+        """
+        Detects presence of all 12 key resume sections for the Version 2 Checklist.
+        """
+        text_lower = text.lower()
+        
+        # Primary sections via regex/keyword presence
+        has_contact = bool(re.search(r'[\w\.-]+@[\w\.-]+\.\w+|\+?\d[\d -]{8,}\d', text))
+        has_summary = bool(re.search(r'(?i)\b(summary|objective|profile|about me)\b', text))
+        has_skills = bool(re.search(r'(?i)\b(skills|technical skills|competencies|technologies)\b', text))
+        has_experience = bool(re.search(r'(?i)\b(experience|work history|employment)\b', text))
+        has_education = bool(re.search(r'(?i)\b(education|academic background|qualifications)\b', text))
+        has_projects = bool(re.search(r'(?i)\b(projects|key projects|academic projects)\b', text))
+
+        # Secondary sections via regex pattern matching
+        has_certifications = bool(re.search(cls.CERTIFICATION_HEADER_PATTERN, text, re.MULTILINE))
+        has_languages = bool(re.search(cls.LANGUAGE_HEADER_PATTERN, text, re.MULTILINE))
+        has_awards = bool(re.search(cls.AWARD_HEADER_PATTERN, text, re.MULTILINE))
+        has_publications = bool(re.search(cls.PUBLICATION_HEADER_PATTERN, text, re.MULTILINE))
+        has_interests = bool(re.search(cls.INTEREST_HEADER_PATTERN, text, re.MULTILINE))
+        has_references = bool(re.search(cls.REFERENCE_HEADER_PATTERN, text, re.MULTILINE))
+
+        return {
+            "contact_info": has_contact,
+            "summary": has_summary,
+            "skills": has_skills,
+            "experience": has_experience,
+            "education": has_education,
+            "projects": has_projects,
+            "certifications": has_certifications,
+            "languages": has_languages,
+            "awards": has_awards,
+            "publications": has_publications,
+            "interests": has_interests,
+            "references": has_references,
+        }
 
     @classmethod
     def _extract_section_blocks(cls, text: str) -> dict[str, str]:
@@ -83,7 +121,6 @@ class ResumeParsingEngine:
                     buffer = []
                 current_section = matched_key
             elif current_section:
-                # Stop capturing if another general header is encountered
                 if re.match(cls.ALL_HEADERS_PATTERN, line) and not any(re.search(p, line) for p in patterns.values()):
                     section_map[current_section] = "\n".join(buffer).strip()
                     current_section = None
@@ -214,13 +251,20 @@ class ResumeParsingEngine:
 
     @staticmethod
     def parse_txt(content: bytes) -> tuple[str, dict[str, Any]]:
-        return content.decode("utf-8", errors="ignore"), {}
+        """Extracts text from plain text files with encoding fallback."""
+        try:
+            return content.decode("utf-8"), {}
+        except UnicodeDecodeError:
+            return content.decode("latin-1", errors="ignore"), {}
 
     @classmethod
     def process_document(cls, file_name: str, validation_info: FileValidationResult, content: bytes) -> ParsedResumeData:
         raw_text, is_scanned, metadata = "", False, {}
 
-        match validation_info.file_type.lower():
+        # Ensure leading dot is stripped for matching
+        file_type = validation_info.file_type.lower().lstrip(".")
+
+        match file_type:
             case "pdf":
                 raw_text, is_scanned, metadata = cls.parse_pdf(content)
                 validation_info.is_scanned = is_scanned
@@ -256,11 +300,14 @@ class ResumeParsingEngine:
         # Parse structured sections into Pydantic schema lists
         parsed_sections = cls._parse_structured_sections(cleaned_text)
 
+        # Calculate 12-section completeness flags
+        section_flags = cls.get_section_completeness_flags(cleaned_text)
+
         return ParsedResumeData(
             raw_text=raw_text,
             cleaned_text=cleaned_text,
             file_name=file_name,
-            file_type=validation_info.file_type,
+            file_type=file_type,
             metadata=metadata,
             validation_info=validation_info,
             quality_info=quality_info,

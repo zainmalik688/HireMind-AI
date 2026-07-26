@@ -6,6 +6,9 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
+# Import response schema for Gemini Structured Output
+from app.api.schemas import AuditReportResponse
+
 load_dotenv()
 
 # Read the Gemini API Key from environment variables
@@ -17,6 +20,21 @@ if not api_key:
 # Initialize Google GenAI client
 client = genai.Client(api_key=api_key)
 logger = logging.getLogger(__name__)
+
+
+def sanitize_schema_for_gemini(schema: dict) -> dict:
+    """
+    Recursively removes 'additionalProperties' to satisfy Gemini Developer API strict validation.
+    """
+    if isinstance(schema, dict):
+        schema.pop("additionalProperties", None)
+        for value in schema.values():
+            sanitize_schema_for_gemini(value)
+    elif isinstance(schema, list):
+        for item in schema:
+            sanitize_schema_for_gemini(item)
+    return schema
+
 
 SYSTEM_PROMPT_V4_1_PRODUCTION = """
 # HireMind AI — FAANG Senior Recruiter & ATS Intelligence System
@@ -325,7 +343,7 @@ You MUST respond ONLY with a valid single JSON object (no markdown formatting, n
 """
 
 async def analyze_resume_text(text: str, target_role: str = None, max_retries: int = 3) -> str:
-    """Sends extracted resume text to Gemini 3.6 Flash for Production FAANG Analysis."""
+    """Sends extracted resume text to Gemini for Production FAANG Analysis."""
     if not text or not text.strip():
         raise ValueError("Provided resume text is empty or could not be parsed.")
 
@@ -333,15 +351,20 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
     if target_role and target_role.strip():
         user_payload += f"\n\nTARGET_ROLE:\n{target_role.strip()}"
 
+    # Generate JSON schema dict and sanitize additionalProperties for Gemini API mode compatibility
+    raw_schema = AuditReportResponse.model_json_schema()
+    sanitized_schema = sanitize_schema_for_gemini(raw_schema)
+
     for attempt in range(max_retries):
         try:
-            # Native async execution using client.aio with gemini-3.6-flash
+            # Native async execution using client.aio with gemini-3.6-flash & sanitized Pydantic structured output schema
             response = await client.aio.models.generate_content(
                 model="gemini-3.6-flash",
                 contents=f"Perform an exhaustive, ruthless, evidence-grounded FAANG recruiter audit on this resume input:\n\n{user_payload}",
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT_V4_1_PRODUCTION,
                     response_mime_type="application/json",
+                    response_schema=sanitized_schema,  # <--- Cleaned schema satisfies Gemini Developer API mode
                     temperature=0.1,
                 )
             )

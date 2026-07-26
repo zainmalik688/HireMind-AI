@@ -1,12 +1,19 @@
 import io
+import os
 from typing import Any
 import fitz  # PyMuPDF
 from docx import Document
-from fastapi import UploadFile
+from fastapi import UploadFile, HTTPException
 from app.api.schemas import FileValidationResult
 
 MAX_FILE_SIZE_MB = 10.0
-ALLOWED_EXTENSIONS = {"pdf", "docx", "txt"}
+# Include extensions with and without leading dots to prevent parsing bugs
+ALLOWED_EXTENSIONS = {"pdf", "docx", "txt", ".pdf", ".docx", ".txt"}
+ALLOWED_MIME_TYPES = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "text/plain",
+}
 
 
 class DocumentValidationService:
@@ -15,9 +22,9 @@ class DocumentValidationService:
     async def validate_file(file: UploadFile) -> tuple[FileValidationResult, bytes]:
         """Validate file format, size limit, empty bytes, and file corruption/encryption."""
         filename = file.filename or ""
-        ext = filename.split(".")[-1].lower() if "." in filename else ""
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
-        if ext not in ALLOWED_EXTENSIONS:
+        if ext not in ALLOWED_EXTENSIONS and f".{ext}" not in ALLOWED_EXTENSIONS:
             return FileValidationResult(
                 is_valid=False,
                 file_type=ext,
@@ -45,7 +52,7 @@ class DocumentValidationService:
                 validation_message="Uploaded file is completely empty.",
             ), content
 
-        # Check PDF integrity and password protection
+        # 1. Check PDF integrity and password protection
         if ext == "pdf":
             try:
                 doc = fitz.open(stream=content, filetype="pdf")
@@ -65,7 +72,7 @@ class DocumentValidationService:
                     validation_message="Corrupted PDF file detected. Unable to parse structure.",
                 ), content
 
-        # Check DOCX integrity
+        # 2. Check DOCX integrity
         elif ext == "docx":
             try:
                 Document(io.BytesIO(content))
@@ -76,11 +83,10 @@ class DocumentValidationService:
                     file_size_mb=file_size_mb,
                     validation_message="Corrupted or invalid DOCX document.",
                 ), content
-            
-            # Check TXT integrity and decoding
+
+        # 3. Check TXT integrity and decoding
         elif ext == "txt":
             try:
-                # Test decoding to ensure it's a valid text file
                 try:
                     content.decode("utf-8")
                 except UnicodeDecodeError:
@@ -103,7 +109,7 @@ class DocumentValidationService:
     @staticmethod
     def validate_parsed_content(doc_result: dict[str, Any]) -> dict[str, Any]:
         """
-        Validate the extracted document dictionary from pdf_service.py for
+        Validate the extracted document dictionary for
         scanned PDF detection and text content sufficiency.
         """
         # 1. Scanned Document Check
@@ -113,7 +119,7 @@ class DocumentValidationService:
                 "error_code": "SCANNED_DOCUMENT_DETECTED",
                 "message": (
                     "The uploaded file appears to be a scanned image or photo PDF without readable text. "
-                    "Please upload a searchable text-based PDF or DOCX file."
+                    "Please upload a searchable text-based PDF, DOCX, or TXT file."
                 ),
                 "details": {
                     "word_count": doc_result.get("word_count", 0),

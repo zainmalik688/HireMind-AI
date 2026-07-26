@@ -43,7 +43,7 @@ class ResumeClassifierService:
     @classmethod
     async def classify_and_score_ai(cls, text: str, extracted_entities: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Uses Gemini 3.5 Flash with structured output schema enforcement to classify
+        Uses Gemini 3.6 Flash with structured output schema enforcement to classify
         documents and evaluate section quality.
         """
         if not text or len(text.strip()) < 50:
@@ -60,7 +60,8 @@ class ResumeClassifierService:
                 "ai_reasoning": "Document text is empty or too short."
             }
 
-        api_key = os.getenv("API_KEY")
+        # Check GEMINI_API_KEY first with fallback to API_KEY
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("API_KEY")
         if not api_key:
             return {
                 "is_resume": False,
@@ -72,7 +73,7 @@ class ResumeClassifierService:
                     "sections_score": 0.0,
                     "vocabulary_score": 0.0
                 },
-                "ai_reasoning": "API_KEY variable is missing or empty in environment."
+                "ai_reasoning": "Neither GEMINI_API_KEY nor API_KEY variable is set in environment."
             }
 
         try:
@@ -100,7 +101,7 @@ class ResumeClassifierService:
             for attempt in range(max_retries):
                 try:
                     response = await client.aio.models.generate_content(
-                        model="gemini-3.5-flash",
+                        model="gemini-3.6-flash",
                         contents=prompt,
                         config=types.GenerateContentConfig(
                             response_mime_type="application/json",

@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # V2 Schemas & Services
-from app.api.schemas import ParsedResumeData
+from app.api.schemas import ParsedResumeData, AuditReportResponse
 from app.api.services.validation_service import DocumentValidationService
 from app.api.services.parsing_service import ResumeParsingEngine
 from app.api.services.extractor import EntityExtractor
@@ -116,21 +116,31 @@ async def parse_resume(file: UploadFile = File(...)):
 
 # --- VERSION 3 ANALYSIS ENDPOINT ---
 
-@app.post("/analyze", tags=["V3 Production Engine"])
+@app.post(
+    "/analyze", 
+    response_model=AuditReportResponse, 
+    tags=["V3 Production Engine"]
+)
 async def analyze_resume(
     file: UploadFile = File(...),
     target_role: Optional[str] = Form(None)
 ):
     """
-    Performs evidence-grounded FAANG recruiter audit using Groq Llama-3.1-8b-instant.
+    Performs evidence-grounded FAANG recruiter audit using Gemini 3.6 Flash.
     Accepts resume file and an optional target_role string from Form data.
+    Enforces AuditReportResponse schema including all 13 Resume Intelligence Dashboard metrics.
     """
-    if not file.filename or not file.filename.lower().endswith(('.pdf', '.docx')):
-        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are supported.")
+    # Defensive filename & extension validation
+    filename = (file.filename or "").lower()
+    if not filename.endswith((".pdf", ".docx", ".txt")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Only PDF, DOCX, and TXT files are supported."
+        )
     
     try:
         file_bytes = await file.read()
-        extracted_result = extract_text_from_file(file_bytes, file.filename)
+        extracted_result = extract_text_from_file(file_bytes, file.filename or "uploaded_document")
         
         # Safe extraction for both dict and string outputs from text service
         if isinstance(extracted_result, dict):
@@ -144,30 +154,37 @@ async def analyze_resume(
             extracted_text = str(extracted_result) if extracted_result else ""
         
         if not extracted_text or not extracted_text.strip():
-            raise HTTPException(status_code=400, detail="Could not extract readable text from the document.")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, 
+                detail="Could not extract readable text from the document."
+            )
             
-        # Execute Groq V3 Recruiter Intelligence Audit
+        # Execute Gemini Recruiter Intelligence Audit
         raw_analysis = await analyze_resume_text(text=extracted_text, target_role=target_role)
 
-        # Ensure return payload is cleanly parsed as a native JSON dict
+        # Parse return payload cleanly into native JSON dict
         if isinstance(raw_analysis, str):
             clean_json_str = raw_analysis.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            try:
-                analysis_dict = json.loads(clean_json_str)
-            except json.JSONDecodeError:
-                analysis_dict = {"raw_output": raw_analysis}
+            analysis_dict = json.loads(clean_json_str)
         elif isinstance(raw_analysis, dict):
             analysis_dict = raw_analysis.get("analysis", raw_analysis)
         else:
-            analysis_dict = {}
+            raise ValueError("Invalid output format returned by AI Service.")
 
-        return {
-            "filename": file.filename, 
-            "status": "success", 
-            "analysis": analysis_dict
-        }
+        return analysis_dict
         
     except ValueError as ve:
-        raise HTTPException(status_code=400, detail=str(ve))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail=str(ve)
+        )
+    except json.JSONDecodeError as jde:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail=f"Failed to parse audit JSON response: {str(jde)}"
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail=f"Server error: {str(e)}"
+        )

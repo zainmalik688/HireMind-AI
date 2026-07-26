@@ -93,6 +93,21 @@ class ParsedResumeData(BaseModel):
 # RECRUITER V3 ENGINE RESPONSE SCHEMAS
 # ==========================================
 
+class ResumeIntelligenceDashboard(BaseModel):
+    overall_resume_health_score: int = Field(..., ge=0, le=100, description="Overall health score of the resume.")
+    resume_quality_score: int = Field(..., ge=0, le=100, description="General content and presentation quality score.")
+    resume_completeness: int = Field(..., ge=0, le=100, description="Overall completeness score across essential sections.")
+    section_completeness: dict[str, bool] = Field(..., description="Presence map of core sections (e.g. summary, experience, skills, education).")
+    readability_score: int = Field(..., ge=0, le=100, description="Readability and scanability score.")
+    professional_tone_analysis: str = Field(..., description="Assessment of tone (e.g., Action-oriented, Professional, Passive).")
+    formatting_quality: int = Field(..., ge=0, le=100, description="Formatting and visual structure quality rating.")
+    technical_depth_analysis: int = Field(..., ge=0, le=100, description="Depth and rigor of technical skills and projects.")
+    resume_strength_rating: str = Field(..., description="Rating band (e.g., Exceptional, Strong, Moderate, Weak).")
+    career_readiness_score: int = Field(..., ge=0, le=100, description="General career trajectory readiness score.")
+    technical_readiness: int = Field(..., ge=0, le=100, description="Role-specific technical mastery score.")
+    industry_readiness: int = Field(..., ge=0, le=100, description="Alignment with current industry standards.")
+    employability_score: int = Field(..., ge=0, le=100, description="Overall marketability and employability rating.")
+
 class CandidateSnapshot(BaseModel):
     candidate_name: str
     career_level: str
@@ -231,6 +246,7 @@ class ROIImprovementItem(BaseModel):
     estimated_time: str
 
 class AuditReportResponse(BaseModel):
+    dashboard_metrics: ResumeIntelligenceDashboard  # <--- Added explicit dashboard breakdown
     candidate_snapshot: CandidateSnapshot
     executive_summary: str
     explainable_scorecard: ExplainableScorecard
