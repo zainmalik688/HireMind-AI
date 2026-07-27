@@ -54,8 +54,18 @@ async def parse_resume(file: UploadFile = File(...)):
     uses AI to evaluate resume classification & confidence, and extracts entities.
     """
     # 1. Perform Security & Integrity Validation
-    validation_info, content = await DocumentValidationService.validate_file(file)
-    
+    try:
+        validation_info, content = await DocumentValidationService.validate_file(file)
+    except Exception as err:
+        # validate_file() is expected to catch its own per-format errors and
+        # return a FileValidationResult, but under load (disk I/O errors,
+        # truncated uploads, connection resets mid-read) it can still raise.
+        # Without this guard that would surface as a raw, unhandled 500.
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred while validating the uploaded file: {str(err)}"
+        )
+
     if not validation_info.is_valid:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -103,10 +113,29 @@ async def parse_resume(file: UploadFile = File(...)):
 
     # 3. Extract Entities (Name, Contact Info, Skills)
     cleaned_text = response_dict.get("cleaned_text", "")
-    extracted_entities = EntityExtractor.parse_all(cleaned_text)
+    try:
+        extracted_entities = EntityExtractor.parse_all(cleaned_text)
+    except Exception as err:
+        # Entity extraction is pure regex/string parsing over untrusted
+        # document text -- an unusual document shouldn't be able to take
+        # the whole endpoint down with an unhandled 500 traceback.
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred while extracting resume entities: {str(err)}"
+        )
 
     # 4. AI-Powered Resume Classification & Confidence Scoring
-    classification_results = await ResumeClassifierService.classify_and_score_ai(cleaned_text, extracted_entities)
+    # ResumeClassifierService.classify_and_score_ai() already has its own
+    # internal try/except with a graceful fallback payload, so no exception
+    # is expected here -- but the call is still guarded for defense in depth
+    # against a future change to that service dropping its own handling.
+    try:
+        classification_results = await ResumeClassifierService.classify_and_score_ai(cleaned_text, extracted_entities)
+    except Exception as err:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred during AI resume classification: {str(err)}"
+        )
 
     response_dict["extracted_data"] = extracted_entities
     response_dict["classification"] = classification_results
@@ -158,7 +187,22 @@ async def analyze_resume(
                 status_code=status.HTTP_400_BAD_REQUEST, 
                 detail="Could not extract readable text from the document."
             )
-            
+
+        # Reject extremely short documents up front with an actionable message
+        # rather than sending near-empty content to Gemini, which tends to
+        # produce a nonsensical or malformed audit instead of a clean error.
+        MIN_WORD_COUNT = 30
+        word_count = len(extracted_text.split())
+        if word_count < MIN_WORD_COUNT:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"The document only contains {word_count} extractable word(s), which is "
+                    f"too short to evaluate as a resume (minimum {MIN_WORD_COUNT}). Please "
+                    "upload a more complete document."
+                ),
+            )
+
         # Execute Gemini Recruiter Intelligence Audit
         raw_analysis = await analyze_resume_text(text=extracted_text, target_role=target_role)
 
@@ -171,8 +215,35 @@ async def analyze_resume(
         else:
             raise ValueError("Invalid output format returned by AI Service.")
 
-        return analysis_dict
-        
+        if not isinstance(analysis_dict, dict):
+            raise ValueError(
+                "AI Service returned an unexpected payload shape (expected a JSON object)."
+            )
+
+        # Explicitly validate against the response schema here, inside the
+        # try block, so a malformed Gemini payload surfaces as a clean 400/500
+        # HTTPException instead of an unhandled FastAPI ResponseValidationError
+        # (which would otherwise escape this handler entirely as a raw 500).
+        try:
+            validated = AuditReportResponse.model_validate(analysis_dict)
+        except Exception as schema_err:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=(
+                    "The AI service returned a response that did not match the "
+                    f"expected audit schema: {str(schema_err)}"
+                ),
+            )
+
+        return validated
+
+    except HTTPException:
+        # Re-raise HTTPExceptions we deliberately constructed above as-is --
+        # without this, the bare `except Exception` below would catch them
+        # too (HTTPException is an Exception subclass) and incorrectly
+        # rewrap a clean 400 "Could not extract text" response into a 500
+        # "Server error", masking the real, actionable error from the client.
+        raise
     except ValueError as ve:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 

@@ -29,6 +29,7 @@ class ResumeParsingEngine:
     PUBLICATION_HEADER_PATTERN = r'(?i)^\s*(?:3\.\s*|•\s*)?(?:publications?|research\s+papers?|papers?|articles?|journals?|conference\s+proceedings?)\b'
     INTEREST_HEADER_PATTERN = r'(?i)^\s*(?:3\.\s*|•\s*)?(?:interests?|hobbies?|personal\s+interests?|extracurricular\s+activities?|hobbies\s*&\s*interests?)\b'
     REFERENCE_HEADER_PATTERN = r'(?i)^\s*(?:3\.\s*|•\s*)?(?:references?|professional\s+references?|referees?)\b'
+    SUMMARY_HEADER_PATTERN = r'(?i)^\s*(?:3\.\s*|•\s*)?(?:summary|professional\s+summary|profile|about\s+me|objective|career\s+objective|career\s+summary)\b'
 
     # Universal Header Detector for Section Boundary Splitting
     ALL_HEADERS_PATTERN = r'(?im)^\s*(?:[0-9]+\.|\u2022|-|\*)*\s*(?:certifications?|licenses?|credentials?|languages?|awards?|honors?|achievements?|publications?|research\s+papers?|interests?|hobbies?|references?|referees?|experience|education|skills|projects|summary|work\s+experience)\b.*$'
@@ -106,6 +107,7 @@ class ResumeParsingEngine:
             "publications": cls.PUBLICATION_HEADER_PATTERN,
             "interests": cls.INTEREST_HEADER_PATTERN,
             "references": cls.REFERENCE_HEADER_PATTERN,
+            "summary": cls.SUMMARY_HEADER_PATTERN,
         }
 
         for line in lines:
@@ -132,6 +134,18 @@ class ResumeParsingEngine:
             section_map[current_section] = "\n".join(buffer).strip()
 
         return section_map
+
+    @classmethod
+    def extract_summary(cls, text: str) -> str:
+        """
+        Extracts the candidate's summary / objective / profile paragraph as a
+        plain string (empty string if none was detected), for inclusion in
+        the parsed response alongside the other structured sections.
+        """
+        if not text:
+            return ""
+        blocks = cls._extract_section_blocks(text)
+        return blocks.get("summary", "").strip()
 
     @classmethod
     def _parse_structured_sections(cls, text: str) -> dict[str, list[Any]]:
@@ -300,6 +314,9 @@ class ResumeParsingEngine:
         # Parse structured sections into Pydantic schema lists
         parsed_sections = cls._parse_structured_sections(cleaned_text)
 
+        # Extract the summary / objective / profile paragraph as plain text
+        summary_text = cls.extract_summary(cleaned_text)
+
         # Calculate 12-section completeness flags
         section_flags = cls.get_section_completeness_flags(cleaned_text)
 
@@ -311,6 +328,8 @@ class ResumeParsingEngine:
             metadata=metadata,
             validation_info=validation_info,
             quality_info=quality_info,
+            summary=summary_text or None,
+            section_completeness=section_flags,
             certifications=parsed_sections["certifications"],
             languages=parsed_sections["languages"],
             awards=parsed_sections["awards"],

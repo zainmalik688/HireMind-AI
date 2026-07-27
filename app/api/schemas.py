@@ -63,6 +63,14 @@ class ParsedResumeData(BaseModel):
     metadata: dict[str, Any]
     validation_info: FileValidationResult
     quality_info: ResumeQualityCheck
+    summary: str | None = Field(
+        None,
+        description="Candidate's summary / objective / profile paragraph, if a dedicated section was detected."
+    )
+    section_completeness: dict[str, bool] | None = Field(
+        None,
+        description="Presence map for the 12 core resume sections (contact_info, summary, skills, experience, etc.)."
+    )
     certifications: list[CertificationItem] = Field(
         default_factory=list, 
         description="List of professional certifications, licenses, or accredited courses"
@@ -139,11 +147,17 @@ class CandidateSnapshot(BaseModel):
     overall_hiring_recommendation: str
 
 class ScoreBreakdown(BaseModel):
-    formatting: str
-    keywords: str
-    structure: str
-    achievements: str
-    ats_compatibility: str
+    """
+    Point-based ATS sub-score breakdown. Each category is bounded to its own
+    maximum, and the five maximums sum to exactly 100 so that
+    ats_score.score can always be deterministically recomputed as their sum
+    (see _apply_scorecard_mathematical_alignment in ai_service.py).
+    """
+    formatting: int = Field(..., ge=0, le=15, description="Points for resume formatting/visual clarity/scanability, out of a 15-point maximum.")
+    keywords: int = Field(..., ge=0, le=25, description="Points for keyword and ATS-taxonomy alignment, out of a 25-point maximum.")
+    structure: int = Field(..., ge=0, le=20, description="Points for section structure/organization/ordering, out of a 20-point maximum.")
+    achievements: int = Field(..., ge=0, le=25, description="Points for quantified achievements and measurable impact, out of a 25-point maximum.")
+    ats_compatibility: int = Field(..., ge=0, le=15, description="Points for raw ATS parseability (fonts, tables, columns, file structure), out of a 15-point maximum.")
 
 class ATSScoreItem(BaseModel):
     score: int = Field(ge=0, le=100)

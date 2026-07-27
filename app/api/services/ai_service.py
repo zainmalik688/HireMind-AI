@@ -1,16 +1,37 @@
+"""
+ai_service.py — Gemini-powered FAANG Recruiter Audit Engine (V4.1 Production)
+
+This module is organized into clearly separated concerns so the execution
+logic at the bottom stays short and readable:
+
+    1. Configuration & client initialization
+    2. System prompt (the full audit instruction set sent to Gemini)
+    3. Post-processing constants (regex patterns used by the grounding safeguards)
+    4. Schema utilities (Gemini structured-output schema sanitization)
+    5. Post-processing safeguards (deterministic fixes for Problems 3, 4 & 5)
+    6. Core service execution (analyze_resume_text)
+"""
+
 import os
 import re
+import json
 import asyncio
 import logging
-import json
+from typing import Any
+
 from dotenv import load_dotenv
+from pydantic import ValidationError
 from google import genai
-from google.genai import types
+from google.genai import types, errors
 
 # Import response schema for Gemini Structured Output
 from app.api.schemas import AuditReportResponse
 
 load_dotenv()
+
+# =============================================================================
+# 1. CONFIGURATION & CLIENT INITIALIZATION
+# =============================================================================
 
 # Read the Gemini API Key from environment variables
 api_key = os.getenv("GEMINI_API_KEY")
@@ -18,24 +39,22 @@ api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
     raise ValueError("GEMINI_API_KEY is not set in environment variables.")
 
+# Model tag is configurable via environment variable so it can be swapped
+# (e.g. for a newer Gemini release or a different tier/region) without a code
+# change or redeploy. Falls back to our primary production model if unset.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+
 # Initialize Google GenAI client
 client = genai.Client(api_key=api_key)
 logger = logging.getLogger(__name__)
 
+# HTTP-equivalent status codes from the Gemini API that are safe to retry with
+# exponential backoff (rate limiting and transient server-side failures).
+_RETRYABLE_API_STATUS_CODES = {429, 500, 503}
 
-def sanitize_schema_for_gemini(schema: dict) -> dict:
-    """
-    Recursively removes 'additionalProperties' to satisfy Gemini Developer API strict validation.
-    """
-    if isinstance(schema, dict):
-        schema.pop("additionalProperties", None)
-        for value in schema.values():
-            sanitize_schema_for_gemini(value)
-    elif isinstance(schema, list):
-        for item in schema:
-            sanitize_schema_for_gemini(item)
-    return schema
-
+# =============================================================================
+# 2. SYSTEM PROMPT
+# =============================================================================
 
 SYSTEM_PROMPT_V4_1_PRODUCTION = """
 # HireMind AI — FAANG Senior Recruiter & ATS Intelligence System
@@ -89,22 +108,24 @@ NON-NEGOTIABLE AUDIT RULES
      * `domain_specializations`: domain-specific subfields (Computer Vision, NLP, Radiology Imaging, Recommender Systems, etc.).
    - A keyword must appear in exactly one taxonomy category — no duplicates across categories.
 
-4. STRICT SCORING MATHEMATICAL ALIGNMENT (CRITICAL):
+4. STRICT SCORING MATHEMATICAL ALIGNMENT (CRITICAL — HARD BOUNDS, not suggestions):
    - Scores MUST strictly match the identified red flags for the targeted track. Do NOT give scores above 80/100 if major core gaps exist.
-   - DEDUCTION MATRIX:
-     * Missing Cloud (AWS/GCP/Azure): Deduct 5-8 points from ATS & Technical Depth.
-     * Missing Containerization (Docker/K8s): Deduct 5-8 points from Technical Depth.
-     * Missing Quantified Metrics (%/$ numbers): Deduct 10-15 points from ATS & Recruiter Signal.
-     * Missing Industry/Internship Experience: Cap Overall Score at 75-80 MAX for Senior/FAANG tracks.
-   - If a candidate has 3+ "Not Found" items in the matrix, their Overall Score MUST NOT exceed 78/100 and interview_probability CANNOT exceed 50-60%.
-   - IF DOMAIN_MISMATCH = TRUE: Overall Score MUST NOT exceed 30/100 and interview_probability MUST NOT exceed 5% against TARGET_ROLE, regardless of resume quality — the mismatch itself is the disqualifying factor, not resume polish.
+   - ATS BREAKDOWN ALIGNMENT: `ats_score.breakdown` has five point categories with fixed maximums that sum to exactly 100: formatting (0-15), keywords (0-25), structure (0-20), achievements (0-25), ats_compatibility (0-15). Assign each category honestly based on evidence, then set `ats_score.score` equal to the sum of all five category points — the score is a computed total, not an independent estimate. (A deterministic Python-side pass re-sums and overrides this after generation regardless, so this MUST be internally consistent in your own output to avoid an unexplained score change.)
+   - DEDUCTION MATRIX (governs how you allocate the breakdown points above and the technical_depth/recruiter_signal scores):
+     * Missing Cloud (AWS/GCP/Azure): Deduct 5-8 points from `keywords`/`ats_compatibility` and from `technical_depth.score`.
+     * Missing Containerization (Docker/K8s): Deduct 5-8 points from `technical_depth.score`.
+     * Missing Quantified Metrics (%/$ numbers): Deduct 10-15 points from `achievements` and from `recruiter_signal.score`.
+     * Missing Industry/Internship Experience: Cap `overall_hiring_score.score` at 75-80 MAX for Senior/FAANG tracks.
+   - HARD CAP — RED FLAG THRESHOLD: If `recruiter_evidence_matrix` contains 3 or more rows with status "Not Found" or "Limited", `overall_hiring_score.score` MUST NOT exceed 75/100, and `interview_probability` MUST NOT exceed 50%. These are hard ceilings, not soft targets — do not output 76+ or "55%" under this condition.
+   - HARD CAP — ELIGIBILITY FAILURE: IF `eligibility_check.status` == "FAILED" (DOMAIN_MISMATCH = TRUE): `overall_hiring_score.score` MUST NOT exceed 30/100 and `interview_probability` MUST NOT exceed 5% against TARGET_ROLE, regardless of resume quality — the mismatch itself is the disqualifying factor, not resume polish. This cap is stricter than and overrides the red-flag-threshold cap above whenever both conditions are true.
+   - These two hard caps are enforced a second time by a deterministic Python-side safeguard after generation (`_apply_scorecard_mathematical_alignment`), so treat them as non-negotiable rather than as guidance you might round past.
 
 5. ZERO DUPLICATED TEXT / UNIQUE ROW MANDATE (CRITICAL):
    - EVERY single row in `recruiter_evidence_matrix` MUST have unique, distinct, and field-specific notes.
    - DO NOT repeat the same summary text across multiple requirement rows. For example, "AI / ML Projects" must cite specific model architecture, "Model Deployment / APIs" must evaluate specific endpoint usage or frame it as "Not Found", and "Research Experience" must reference academic papers or benchmarking specific to research.
    - Every entry in `priority_action_plan` and `top_10_highest_roi_improvements` MUST be completely distinct. Zero overlap. This applies even under the OVERRIDE PROTOCOL in Rule 2A — the mandatory override row does not exempt the remaining rows from uniqueness.
 
-6. ZERO PLACEHOLDERS: NEVER output generic bracketed placeholders like "[Insert %]", "[Insert Latency ms]", or "[X%]" in evaluative text. (The literal tokens "[TARGET_ROLE]" and "[PIVOT_ROLE]" in Rule 2A are template variables for you to resolve with the actual role names — resolve them before output; never emit the literal brackets.) Construct realistic, concrete numeric estimates and plausible metrics directly into STAR rewrites (e.g., "improving accuracy by 14% and reducing inference latency by 45ms").
+6. NO FABRICATED METRICS — GROUNDED NUMBERS OR EXPLICIT PLACEHOLDERS ONLY: NEVER invent a percentage, latency figure, dollar amount, multiplier, or any other numeric claim that is not directly supported by the resume text. Every number that appears in a STAR rewrite's `optimized` field MUST either (a) already appear in the resume text (verbatim or as a straightforward restatement of a number that is genuinely there), or (b) be replaced with an explicit bracketed placeholder naming exactly what the candidate needs to fill in, e.g., "[Insert Accuracy %]", "[Insert Latency in ms]", "[Insert Cost Savings]", "[Insert Throughput Improvement]". A rewrite that legitimately has no real metric to cite MUST use a placeholder rather than a confident-sounding invented number — a placeholder is honest; a fabricated statistic is not. (The literal tokens "[TARGET_ROLE]" and "[PIVOT_ROLE]" in Rule 2A are a separate case — template variables for you to resolve with the actual role names before output; never emit those two literal brackets unresolved.)
 
 7. NO REPETITIVE ADVICE: Banned generic phrases: "Learn Cloud", "Improve metrics", "Learn RL", "Network more". Instead, link every recommendation directly to an existing project or concrete tool (e.g., "Containerize GastroVision using Docker and deploy via FastAPI on Render").
 
@@ -174,13 +195,13 @@ You MUST respond ONLY with a valid single JSON object (no markdown formatting, n
     "ats_score": {
       "score": 72,
       "breakdown": {
-        "formatting": "18/20 - Standard section headers detected",
-        "keywords": "14/20 - Lacks cloud and DevOps keywords for target role",
-        "structure": "16/20 - Clear hierarchy",
-        "achievements": "10/20 - Lacks quantified production metrics",
-        "ats_compatibility": "14/20 - Unparsed graphical elements or missing standard sections"
+        "formatting": 12,
+        "keywords": 16,
+        "structure": 15,
+        "achievements": 15,
+        "ats_compatibility": 14
       },
-      "reason_not_higher": "Specific explanation detailing lost ATS efficiency. Under DOMAIN_MISMATCH=TRUE, use the keyword-parser/hard-criteria lens per Rule 7C-b — distinct wording from every other mismatch explanation in this report."
+      "reason_not_higher": "Specific explanation detailing lost ATS efficiency, referencing exactly which breakdown categories lost points and why. Under DOMAIN_MISMATCH=TRUE, use the keyword-parser/hard-criteria lens per Rule 7C-b — distinct wording from every other mismatch explanation in this report."
     },
     "technical_depth": {
       "score": 78,
@@ -311,7 +332,7 @@ You MUST respond ONLY with a valid single JSON object (no markdown formatting, n
       "production_readiness": "Ready | Partial | Low",
       "star_rewrite": {
         "original": "Original weak bullet quoted directly from resume",
-        "optimized": "Fully written STAR rewrite WITH concrete plausible numbers included (NO bracketed placeholders)",
+        "optimized": "Fully written STAR rewrite using ONLY metrics grounded in the resume text; use an explicit placeholder like '[Insert Accuracy %]' for any metric not actually present in the resume",
         "why_it_works": "Why this rewrite lands interviews for target role"
       }
     }
@@ -366,6 +387,128 @@ You MUST respond ONLY with a valid single JSON object (no markdown formatting, n
 }
 """
 
+
+# =============================================================================
+# 3. POST-PROCESSING CONSTANTS
+#    Regex patterns and lookup tables used by the deterministic grounding
+#    safeguards in section 5 below (Problem 3: keyword grounding; Problem 4:
+#    STAR-rewrite metric grounding; Problem 5: scorecard mathematical alignment).
+# =============================================================================
+
+# Matches metric-shaped numeric tokens: currency ($120K, $2.5M), percentages
+# (14%, 93.4%), latency in milliseconds (45ms, 120 ms), multipliers (3x, 2.5x),
+# and durations in seconds (30 seconds, 12 sec). Plain numbers with no unit
+# (years, dates, counts like "7 projects") are intentionally NOT matched, since
+# those are not the kind of "fabricated metric" Problem 4 is about.
+_METRIC_TOKEN_PATTERN = re.compile(
+    r'\$\s?\d[\d,]*(?:\.\d+)?\s?[kKmMbB]?\b'
+    r'|\b\d[\d,]*(?:\.\d+)?\s?%'
+    r'|\b\d[\d,]*(?:\.\d+)?\s?(?:ms|milliseconds)\b'
+    r'|\b\d[\d,]*(?:\.\d+)?\s?x\b'
+    r'|\b\d[\d,]*(?:\.\d+)?\s?(?:seconds|secs|sec)\b',
+    re.IGNORECASE,
+)
+
+# Matches bare-decimal ML metrics that carry no %/ms/$/x suffix but are still
+# fabrication-prone (e.g. "BLEU 0.38", "F1 0.91", "mAP 0.72", "RMSE 4.2").
+# Rule 4's own example ("BLEU 0.38") is exactly this shape, so it needs its
+# own pattern separate from _METRIC_TOKEN_PATTERN above.
+_LABELED_METRIC_PATTERN = re.compile(
+    r'\b(BLEU|ROUGE|F1[- ]?score|F1|mAP|IoU|AUC|ROC[- ]?AUC|RMSE|MAE|R2|R\^2|precision|recall|accuracy)'
+    r'\s*(?:score|of|[:=])?\s*\d+(?:\.\d+)?%?',
+    re.IGNORECASE,
+)
+
+# --- Problem 5: scorecard mathematical alignment constants ---
+
+# recruiter_evidence_matrix row statuses that count as a "red flag" for the
+# hard-cap threshold below. Matched case-insensitively against the row's
+# `status` field.
+_RED_FLAG_STATUSES = {"not found", "limited"}
+_RED_FLAG_ROW_THRESHOLD = 3
+
+# Hard ceiling applied when 3+ red-flag rows are present in the evidence matrix.
+_RED_FLAG_SCORE_CAP = 75
+_RED_FLAG_PROBABILITY_CAP = 50
+
+# Hard ceiling applied when eligibility_check.status == "FAILED" (domain
+# mismatch). Stricter than, and takes precedence over, the red-flag cap above.
+_ELIGIBILITY_FAILED_SCORE_CAP = 30
+_ELIGIBILITY_FAILED_PROBABILITY_CAP = 5
+
+# Extracts numeric values out of an interview_probability string such as
+# "45%" or "50-60%" so the effective (upper-bound) value can be checked
+# against a cap.
+_PERCENT_NUMBER_PATTERN = re.compile(r'\d+(?:\.\d+)?')
+
+
+_LABELED_METRIC_DISPLAY_NAMES = {
+    "bleu": "BLEU Score",
+    "rouge": "ROUGE Score",
+    "f1": "F1 Score",
+    "f1score": "F1 Score",
+    "map": "mAP",
+    "iou": "IoU",
+    "auc": "AUC",
+    "rocauc": "ROC-AUC",
+    "rmse": "RMSE",
+    "mae": "MAE",
+    "r2": "R\u00b2 Score",
+    "precision": "Precision",
+    "recall": "Recall",
+    "accuracy": "Accuracy %",
+}
+
+
+def _placeholder_for_labeled_metric(label: str) -> str:
+    """Maps a matched ML-metric label (BLEU, F1, accuracy, etc.) to an honest placeholder."""
+    key = label.strip().lower().replace(" ", "").replace("-", "")
+    display = _LABELED_METRIC_DISPLAY_NAMES.get(key, label.strip().title())
+    return f"[Insert {display}]"
+
+
+def _placeholder_for_metric_token(token: str) -> str:
+    """Maps a matched numeric token to an honest, descriptive placeholder label."""
+    normalized = token.strip().lower()
+    if normalized.startswith("$"):
+        return "[Insert $ Value]"
+    if normalized.endswith("%"):
+        return "[Insert %]"
+    if "ms" in normalized or "millisecond" in normalized:
+        return "[Insert Latency]"
+    if normalized.endswith("x"):
+        return "[Insert Multiplier]"
+    if "sec" in normalized:
+        return "[Insert Duration]"
+    return "[Insert Metric]"
+
+
+# =============================================================================
+# 4. SCHEMA UTILITIES
+# =============================================================================
+
+def sanitize_schema_for_gemini(schema: dict) -> dict:
+    """
+    Recursively removes 'additionalProperties' to satisfy Gemini Developer API strict validation.
+    """
+    if isinstance(schema, dict):
+        schema.pop("additionalProperties", None)
+        for value in schema.values():
+            sanitize_schema_for_gemini(value)
+    elif isinstance(schema, list):
+        for item in schema:
+            sanitize_schema_for_gemini(item)
+    return schema
+
+# =============================================================================
+# 5. POST-PROCESSING SAFEGUARDS
+#    Deterministic corrections applied after every Gemini call, independent of
+#    whether the model followed the system prompt's grounding rules. These are
+#    hard guarantees, not suggestions -- keep in sync with Rule 3A (keyword
+#    grounding), Rule 4 (scorecard mathematical alignment), and Rule 6
+#    (metric grounding) above.
+# =============================================================================
+
 def _apply_keyword_grounding_fix(analysis_dict: dict, resume_text: str) -> dict:
     """
     Deterministic safety net for Problem 3 (false-negative keyword deductions).
@@ -410,8 +553,236 @@ def _apply_keyword_grounding_fix(analysis_dict: dict, resume_text: str) -> dict:
     return analysis_dict
 
 
-async def analyze_resume_text(text: str, target_role: str = None, max_retries: int = 3) -> str:
-    """Sends extracted resume text to Gemini for Production FAANG Analysis."""
+def _apply_star_rewrite_metric_safeguard(analysis_dict: dict, resume_text: str) -> dict:
+    """
+    Deterministic safety net for Problem 4 (fabricated STAR rewrite metrics).
+
+    The corrected Rule 6 in the system prompt asks the model to only use
+    resume-grounded numbers or explicit placeholders, but prompt instructions
+    are best-effort, not a guarantee. This function re-scans every
+    individual_project_reviews[*].star_rewrite.optimized string for
+    metric-shaped numeric tokens (percentages, latency, currency, multipliers,
+    durations) and checks each one against the literal resume_text. Any token
+    that does not appear verbatim in the resume is a fabrication and gets
+    replaced with an explicit bracketed placeholder naming what's missing,
+    overriding whatever number the model invented. Tokens that genuinely
+    appear in the resume are left untouched. Nothing else in the payload,
+    including the `original` bullet quote, is modified.
+    """
+    reviews = analysis_dict.get("individual_project_reviews")
+    if not isinstance(reviews, list) or not resume_text:
+        return analysis_dict
+
+    text_lower = resume_text.lower()
+
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        star = review.get("star_rewrite")
+        if not isinstance(star, dict):
+            continue
+        optimized = star.get("optimized")
+        if not isinstance(optimized, str) or not optimized:
+            continue
+
+        def _replace(match: "re.Match") -> str:
+            token = match.group(0)
+            if token.strip().lower() in text_lower:
+                return token
+            return _placeholder_for_metric_token(token)
+
+        def _replace_labeled(match: "re.Match") -> str:
+            token = match.group(0)
+            if token.strip().lower() in text_lower:
+                return token
+            return _placeholder_for_labeled_metric(match.group(1))
+
+        optimized = _METRIC_TOKEN_PATTERN.sub(_replace, optimized)
+        optimized = _LABELED_METRIC_PATTERN.sub(_replace_labeled, optimized)
+        star["optimized"] = optimized
+        review["star_rewrite"] = star
+
+    analysis_dict["individual_project_reviews"] = reviews
+    return analysis_dict
+
+
+def _count_red_flag_rows(evidence_matrix: Any) -> int:
+    """Counts recruiter_evidence_matrix rows whose status is 'Not Found' or 'Limited' (case-insensitive)."""
+    if not isinstance(evidence_matrix, list):
+        return 0
+    count = 0
+    for row in evidence_matrix:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status", "")).strip().lower()
+        if status in _RED_FLAG_STATUSES:
+            count += 1
+    return count
+
+
+def _cap_interview_probability(probability_value: Any, cap: int) -> str:
+    """
+    Rewrites an interview_probability string (e.g. "65%", "50-60%") so its
+    effective upper bound never exceeds `cap`. Once capped, returns a single
+    unambiguous "<= N%" string rather than leaving a range that could still
+    read as exceeding the cap.
+    """
+    if not isinstance(probability_value, str) or not probability_value.strip():
+        return f"<= {cap}%"
+    numbers = [float(n) for n in _PERCENT_NUMBER_PATTERN.findall(probability_value)]
+    if not numbers or max(numbers) > cap:
+        return f"<= {cap}%"
+    return probability_value
+
+
+def _apply_scorecard_mathematical_alignment(analysis_dict: dict) -> dict:
+    """
+    Deterministic safety net for Problem 5 (scorecard mathematical alignment).
+
+    Rule 4 in the system prompt asks the model to keep ats_score.breakdown
+    consistent with ats_score.score, and to respect hard caps on
+    overall_hiring_score/interview_probability when red flags or an
+    eligibility failure are present -- but, as with Problems 3 and 4, prompt
+    instructions are best-effort, not a guarantee. This function enforces
+    both mechanically, unconditionally, after generation:
+
+    1. ATS BREAKDOWN <-> SCORE ALIGNMENT: ats_score.score is recomputed as the
+       exact sum of its five breakdown categories (formatting + keywords +
+       structure + achievements + ats_compatibility). Each category is
+       already bounded 0-<max> by the schema (15/25/20/25/15, summing to
+       100), so the recomputed total is always within 0-100 -- no separate
+       clamping is required. The model's own `score` value is overridden
+       unconditionally, guaranteeing exact alignment rather than merely
+       flagging a mismatch.
+
+    2. RED-FLAG / ELIGIBILITY HARD CAPS: overall_hiring_score.score and its
+       interview_probability are forcibly capped when either:
+         - eligibility_check.status == "FAILED" (score <= 30, probability <= 5%), or
+         - 3+ rows in recruiter_evidence_matrix have status "Not Found" or
+           "Limited" (score <= 75, probability <= 50%).
+       The eligibility cap takes precedence whenever both conditions hold,
+       since a domain mismatch is a harder disqualifier than a handful of
+       missing-evidence rows.
+
+    Nothing outside `explainable_scorecard` is modified.
+    """
+    scorecard = analysis_dict.get("explainable_scorecard")
+    if not isinstance(scorecard, dict):
+        return analysis_dict
+
+    # --- 1. ATS breakdown <-> score alignment ---
+    ats_score_obj = scorecard.get("ats_score")
+    if isinstance(ats_score_obj, dict):
+        breakdown = ats_score_obj.get("breakdown")
+        if isinstance(breakdown, dict):
+            numeric_values = []
+            for value in breakdown.values():
+                try:
+                    numeric_values.append(int(value))
+                except (TypeError, ValueError):
+                    numeric_values.append(0)
+            ats_score_obj["score"] = max(0, min(100, sum(numeric_values)))
+            scorecard["ats_score"] = ats_score_obj
+
+    # --- 2. Red-flag / eligibility hard caps on overall_hiring_score ---
+    overall_obj = scorecard.get("overall_hiring_score")
+    if isinstance(overall_obj, dict):
+        eligibility_check = analysis_dict.get("eligibility_check")
+        eligibility_failed = (
+            isinstance(eligibility_check, dict)
+            and str(eligibility_check.get("status", "")).strip().upper() == "FAILED"
+        )
+        red_flag_count = _count_red_flag_rows(analysis_dict.get("recruiter_evidence_matrix"))
+
+        score_cap: int | None = None
+        probability_cap: int | None = None
+        if eligibility_failed:
+            score_cap = _ELIGIBILITY_FAILED_SCORE_CAP
+            probability_cap = _ELIGIBILITY_FAILED_PROBABILITY_CAP
+        elif red_flag_count >= _RED_FLAG_ROW_THRESHOLD:
+            score_cap = _RED_FLAG_SCORE_CAP
+            probability_cap = _RED_FLAG_PROBABILITY_CAP
+
+        if score_cap is not None and probability_cap is not None:
+            try:
+                current_score = int(overall_obj.get("score"))
+            except (TypeError, ValueError):
+                current_score = score_cap + 1  # force the cap if the value is unusable
+            if current_score > score_cap:
+                overall_obj["score"] = score_cap
+            overall_obj["interview_probability"] = _cap_interview_probability(
+                overall_obj.get("interview_probability"), probability_cap
+            )
+            scorecard["overall_hiring_score"] = overall_obj
+
+    analysis_dict["explainable_scorecard"] = scorecard
+    return analysis_dict
+
+
+# =============================================================================
+# 6. CORE SERVICE EXECUTION
+# =============================================================================
+
+def _repair_truncated_json(raw_text: str) -> str:
+    """Best-effort repair of a truncated/malformed JSON string from Gemini.
+
+    Handles the common truncation failure mode where output is cut off
+    mid-string or mid-structure (max_output_tokens hit, or a stray
+    unescaped quote/newline broke a string literal). Walks the text
+    tracking string/escape state and open-bracket depth, backs off to the
+    last safe comma boundary if a string was left open, then appends the
+    correct closing brackets/braces. Conservative by design: it only
+    patches an incomplete tail, it never rewrites well-formed JSON.
+    """
+    text = raw_text.strip()
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("No JSON object found in response.")
+    text = text[start:]
+
+    def _scan(s: str):
+        stack, in_string, escape, last_safe = [], False, False, 0
+        for i, ch in enumerate(s):
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+            else:
+                if ch == '"':
+                    in_string = True
+                elif ch in "{[":
+                    stack.append(ch)
+                elif ch in "}]":
+                    if stack:
+                        stack.pop()
+                elif ch == ",":
+                    last_safe = i + 1
+        return stack, in_string, last_safe
+
+    stack, in_string, last_safe = _scan(text)
+    if in_string:
+        # A string was left dangling open -- truncate back to the last
+        # complete key/value pair rather than closing it mid-word.
+        text = text[:last_safe].rstrip().rstrip(",")
+        stack, _, _ = _scan(text)
+    else:
+        text = text.rstrip().rstrip(",")
+
+    return text + "".join("}" if b == "{" else "]" for b in reversed(stack))
+
+
+async def analyze_resume_text(text: str, target_role: str = None, max_retries: int = 3) -> dict:
+    """
+    Sends extracted resume text to Gemini for a Production FAANG Audit and
+    returns a fully validated, plain-dict representation of AuditReportResponse.
+
+    Returns a dict (not a JSON string) so callers get clean, typed data with no
+    re-parsing required -- main.py's /analyze endpoint can hand this straight
+    back as the response body under response_model=AuditReportResponse.
+    """
     if not text or not text.strip():
         raise ValueError("Provided resume text is empty or could not be parsed.")
 
@@ -425,43 +796,97 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
 
     for attempt in range(max_retries):
         try:
-            # Native async execution using client.aio with gemini-3.6-flash & sanitized Pydantic structured output schema
+            # Native async execution using client.aio with the configured model
+            # & sanitized Pydantic structured output schema
             response = await client.aio.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=f"Perform an exhaustive, ruthless, evidence-grounded FAANG recruiter audit on this resume input:\n\n{user_payload}",
+                model=GEMINI_MODEL,
+                contents=(
+                    "Perform an exhaustive, ruthless, evidence-grounded FAANG "
+                    f"recruiter audit on this resume input:\n\n{user_payload}"
+                    "\n\nOUTPUT LENGTH CONSTRAINT: Keep every bullet point, "
+                    "rationale, and rewrite punchy and concise (1-2 sentences "
+                    "max per field). Do not pad with repetition. The full "
+                    "response must fit well within the output token budget --"
+                    " prioritize covering all required fields completely over "
+                    "writing long-form prose in any single field."
+                ),
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT_V4_1_PRODUCTION,
                     response_mime_type="application/json",
                     response_schema=sanitized_schema,  # <--- Cleaned schema satisfies Gemini Developer API mode
                     temperature=0.1,
-                    max_output_tokens=8192,  # <--- Explicit budget; prevents silent JSON truncation on resumes with many projects
+                    max_output_tokens=16384,  # <--- Raised from 8192; large resumes with many projects were hitting the old ceiling mid-string
                 )
             )
 
-            raw_content = response.text.strip()
+            # response_mime_type="application/json" + response_schema guarantees
+            # raw, unfenced JSON in structured-output mode, so no markdown
+            # stripping is needed here.
+            parsed_content = json.loads(response.text)
 
-            # Clean residual markdown block formatting if present
-            cleaned_content = raw_content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-
-            # Parse, apply the deterministic keyword-grounding correction, then re-serialize
-            parsed_content = json.loads(cleaned_content)
+            # Apply the deterministic keyword-grounding (Problem 3),
+            # metric-grounding (Problem 4), and scorecard mathematical
+            # alignment (Problem 5) corrections directly on the dict -- no
+            # re-serialization to a JSON string and back required.
             parsed_content = _apply_keyword_grounding_fix(parsed_content, text)
-            return json.dumps(parsed_content)
+            parsed_content = _apply_star_rewrite_metric_safeguard(parsed_content, text)
+            parsed_content = _apply_scorecard_mathematical_alignment(parsed_content)
+
+            # Validate against the canonical response schema here, at the
+            # source, so a malformed or incomplete generation is caught with a
+            # clear, typed error instead of surfacing later as an opaque
+            # FastAPI response_model validation failure.
+            validated_report = AuditReportResponse.model_validate(parsed_content)
+            return validated_report.model_dump(mode="json")
 
         except json.JSONDecodeError as jde:
-            logger.warning(f"Gemini output JSON decode attempt {attempt + 1} failed: {str(jde)}")
+            logger.warning(f"Gemini output JSON decode failed on attempt {attempt + 1}/{max_retries}: {jde}")
+            try:
+                repaired_text = _repair_truncated_json(response.text)
+                parsed_content = json.loads(repaired_text)
+                parsed_content = _apply_keyword_grounding_fix(parsed_content, text)
+                parsed_content = _apply_star_rewrite_metric_safeguard(parsed_content, text)
+                parsed_content = _apply_scorecard_mathematical_alignment(parsed_content)
+                validated_report = AuditReportResponse.model_validate(parsed_content)
+                logger.warning("Recovered a truncated/malformed Gemini response via best-effort JSON repair.")
+                return validated_report.model_dump(mode="json")
+            except Exception as repair_err:
+                logger.warning(f"JSON repair also failed on attempt {attempt + 1}/{max_retries}: {repair_err}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(1)
                 continue
-            raise RuntimeError(f"AI Service produced invalid JSON formatting: {str(jde)}")
+            raise RuntimeError(f"AI Service produced invalid JSON formatting: {jde}") from jde
 
-        except Exception as e:
-            error_str = str(e)
-            logger.warning(f"Gemini API attempt {attempt + 1} failed: {error_str}")
+        except ValidationError as ve:
+            logger.warning(f"Gemini output failed AuditReportResponse validation on attempt {attempt + 1}/{max_retries}: {ve}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+                continue
+            raise RuntimeError(f"AI Service produced a response that does not match the expected schema: {ve}") from ve
 
-            # Exponential backoff retry on rate limit (429) or server errors (500/503)
-            if ("429" in error_str or "503" in error_str or "500" in error_str) and attempt < max_retries - 1:
+        except errors.APIError as api_err:
+            logger.warning(
+                f"Gemini API error on attempt {attempt + 1}/{max_retries}: "
+                f"code={api_err.code} status={api_err.status} message={api_err.message}"
+            )
+            if api_err.code in _RETRYABLE_API_STATUS_CODES and attempt < max_retries - 1:
                 await asyncio.sleep(2 ** attempt)
                 continue
+            raise RuntimeError(
+                f"AI Service processing error ({api_err.code} {api_err.status}): {api_err.message}"
+            ) from api_err
 
-            raise RuntimeError(f"AI Service processing error: {error_str}")
+        except Exception as e:
+            # Catch-all for anything not covered above (e.g. a raw network/transport
+            # failure not wrapped by the SDK as an APIError). Still retried with
+            # backoff so a transient connection issue doesn't fail the whole audit.
+            logger.warning(f"Unexpected error on attempt {attempt + 1}/{max_retries}: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            raise RuntimeError(f"AI Service processing error: {e}") from e
+
+    # Defensive fallback; every branch above either returns or raises, so this
+    # should be unreachable, but it guarantees the function never falls through
+    # silently if that invariant is ever broken by a future edit.
+    raise RuntimeError("AI Service exhausted all retry attempts without a successful response.")

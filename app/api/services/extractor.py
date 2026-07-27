@@ -29,6 +29,10 @@ class EntityExtractor:
     }
 
     SECTION_HEADERS = {
+        "summary": [
+            "SUMMARY", "PROFESSIONAL SUMMARY", "PROFILE", "ABOUT ME", "OBJECTIVE",
+            "CAREER OBJECTIVE", "CAREER SUMMARY", "PERSONAL SUMMARY"
+        ],
         "experience": [
             "EXPERIENCE", "WORK EXPERIENCE", "EMPLOYMENT HISTORY", "WORK HISTORY", "PROFESSIONAL EXPERIENCE"
         ],
@@ -96,6 +100,61 @@ class EntityExtractor:
                 clean_name = re.sub(r'[^a-zA-Z\s.]', '', line).strip()
                 if clean_name:
                     return clean_name
+        return None
+
+    # Fallback header pattern used when a resume's summary paragraph isn't
+    # cleanly bounded by one of the SECTION_HEADERS entries above (e.g. a
+    # single-line "Objective: ..." with no following blank-line section break).
+    SUMMARY_HEADER_REGEX = re.compile(
+        r'(?i)^\s*(?:summary|professional\s+summary|profile|about\s+me|objective|'
+        r'career\s+objective|career\s+summary|personal\s+summary)\s*[:\-]?\s*'
+    )
+
+    @classmethod
+    def extract_summary(cls, text: str) -> Optional[str]:
+        """
+        Extracts the candidate's summary / objective / profile paragraph.
+
+        Primary path: use the same section-block splitter as the other
+        SECTION_HEADERS entries, since a summary is almost always its own
+        top-level block just like Experience or Education.
+
+        Fallback path: some resumes put the summary as a single inline line
+        (e.g. "Objective: Aspiring ML engineer...") that never triggers the
+        block splitter's header-then-blank-line pattern. In that case, scan
+        line-by-line for a line that starts with one of the summary header
+        keywords and return the remainder of that line plus any immediately
+        following non-header lines, so a real one-liner summary isn't missed.
+        """
+        if not text:
+            return None
+
+        sections = cls._extract_section_blocks(text)
+        block = sections.get("summary", "").strip()
+        if block:
+            return block
+
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        for idx, line in enumerate(lines):
+            match = cls.SUMMARY_HEADER_REGEX.match(line)
+            if not match:
+                continue
+            inline_remainder = line[match.end():].strip()
+            collected = [inline_remainder] if inline_remainder else []
+            for follow_up in lines[idx + 1:]:
+                follow_upper = follow_up.upper()
+                # Stop as soon as we hit what looks like the next section header.
+                is_next_header = any(
+                    follow_upper == h or follow_upper.startswith(h + " ")
+                    for headers in cls.SECTION_HEADERS.values()
+                    for h in headers
+                )
+                if is_next_header:
+                    break
+                collected.append(follow_up)
+            summary_text = " ".join(collected).strip()
+            return summary_text or None
+
         return None
 
     @classmethod
@@ -315,6 +374,7 @@ class EntityExtractor:
                 "linkedin": links["linkedin"],
                 "github": links["github"]
             },
+            "summary": cls.extract_summary(cleaned_text),
             "skills": skills_found,
             "total_skills_count": len(skills_found),
             "work_experience": cls.parse_work_experience(sections.get("experience", "")),
