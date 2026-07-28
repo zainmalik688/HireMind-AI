@@ -309,9 +309,15 @@ class ROIImprovementItem(BaseModel):
     expected_recruiter_gain: str
     estimated_time: str
 
+class DocumentValidation(BaseModel):
+    is_resume: bool = True
+    confidence_score: float = 0.95
+    detected_doc_type: str = "Resume"
+
 class AuditReportResponse(BaseModel):
     dashboard_metrics: ResumeIntelligenceDashboard  # <--- Added explicit dashboard breakdown
     eligibility_check: EligibilityCheck  # <--- Was required by the prompt but missing from this schema; now present and required
+    document_validation: DocumentValidation = Field(default_factory=DocumentValidation)
     candidate_snapshot: CandidateSnapshot
     executive_summary: str
     explainable_scorecard: ExplainableScorecard
@@ -365,6 +371,21 @@ class AuditReportResponse(BaseModel):
                 "status": "PASSED",
                 "title": "Hard Eligibility Check",
                 "reason": "No regulated licensure or credentialing barrier detected for this target role.",
+            }
+
+        # --- document_validation: always resolve to a complete, well-typed object ---
+        raw_doc_validation = data.get("document_validation")
+        if not isinstance(raw_doc_validation, dict):
+            data["document_validation"] = {
+                "is_resume": True,
+                "confidence_score": 0.95,
+                "detected_doc_type": "Resume",
+            }
+        else:
+            data["document_validation"] = {
+                "is_resume": bool(raw_doc_validation.get("is_resume", True)),
+                "confidence_score": raw_doc_validation.get("confidence_score", 0.95),
+                "detected_doc_type": raw_doc_validation.get("detected_doc_type") or "Resume",
             }
 
         # --- keyword_taxonomy: always resolve to a complete, category-keyed object ---

@@ -1,5 +1,5 @@
 """
-ai_service.py — Gemini-powered FAANG Recruiter Audit Engine (V4.1 Production)
+ai_service.py — HireMind™ Core Analytics Engine (V4.1 Production)
 
 This module is organized into clearly separated concerns so the execution
 logic at the bottom stays short and readable:
@@ -57,11 +57,11 @@ _RETRYABLE_API_STATUS_CODES = {429, 500, 503}
 # =============================================================================
 
 SYSTEM_PROMPT_V4_1_PRODUCTION = """
-# HireMind AI — FAANG Senior Recruiter & ATS Intelligence System
+# HireMind™ Core Analytics Engine — Executive Candidate Assessment System
 # SYSTEM PROMPT v4.1 (Production Engine — Strict Audit, Target Role Calibration, Domain Mismatch Override & Hard Eligibility Layer)
 
 ## IDENTITY & ROLE
-You are HireMind AI, an elite evaluation engine operating as a Senior FAANG Technical Recruiter, ATS Scanner, and AI Engineering Hiring Manager combined. Your job is NOT to act as a polite career coach or summarize resumes. Your job is to perform a ruthless, evidence-grounded recruiter audit that determines if a candidate moves forward.
+You are the HireMind Core Analytics Engine, an evaluation engine operating as a Senior Executive Recruiter & Talent Analytics Engine, ATS Scanner, and AI Engineering Hiring Manager combined. Your job is NOT to act as a polite career coach or summarize resumes. Your job is to perform an objective, evidence-based executive candidate audit that determines if a candidate moves forward.
 
 =========================================================
 NON-NEGOTIABLE AUDIT RULES
@@ -177,6 +177,12 @@ NON-NEGOTIABLE AUDIT RULES
    - Do NOT silently drop, merge unrelated projects together, or truncate the array to save space. If there are many projects, keep each individual review CONCISE (2-4 sentences per prose field) rather than omitting projects — completeness of coverage takes priority over per-project verbosity.
    - Process projects in the exact order they appear in the resume text, so coverage can be verified against the source document.
 
+11. DOCUMENT TYPE VALIDATION:
+   - Populate `document_validation` before evaluating any other section. Set `is_resume` to false only when the submitted text is clearly not a resume or CV (e.g., a cover letter, transcript, or unrelated document).
+   - `confidence_score` is a decimal between 0.0 and 1.0 reflecting certainty in that classification.
+   - `detected_doc_type` names the document type in one short phrase (e.g., "Resume", "Cover Letter", "Academic Transcript").
+   - If `is_resume` is false, still complete every other required field using the best available evidence, and state the document type mismatch plainly in the first sentence of `executive_summary`.
+
 =========================================================
 REQUIRED JSON OUTPUT SCHEMA
 =========================================================
@@ -189,6 +195,11 @@ You MUST respond ONLY with a valid single JSON object (no markdown formatting, n
     "target_roles": ["Target Role 1", "Target Role 2"],
     "years_of_experience": "Estimated or Extracted YOE",
     "overall_hiring_recommendation": "Reject | Borderline | Interview | Strong Interview | Highly Recommended"
+  },
+  "document_validation": {
+    "is_resume": true,
+    "confidence_score": 0.95,
+    "detected_doc_type": "Resume | Cover Letter | Academic Transcript | Portfolio Page | Unrelated Document"
   },
   "executive_summary": "Exhaustive 2-3 paragraph senior recruiter evaluation covering technical breadth, framework depth, competitive positioning against target role benchmarks, and core gaps. If domain mismatch applies, state it plainly and name the pivot role.",
   "explainable_scorecard": {
@@ -801,15 +812,43 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
             response = await client.aio.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=(
-                    "Perform an exhaustive, ruthless, evidence-grounded FAANG "
-                    f"recruiter audit on this resume input:\n\n{user_payload}"
-                    "\n\nOUTPUT LENGTH CONSTRAINT: Keep every bullet point, "
-                    "rationale, and rewrite punchy and concise (1-2 sentences "
-                    "max per field). Do not pad with repetition. The full "
-                    "response must fit well within the output token budget --"
-                    " prioritize covering all required fields completely over "
-                    "writing long-form prose in any single field."
-                ),
+    "Perform a clear, evidence-based candidate review. "
+    "Evaluate the candidate according to their detected career level, "
+    "years of experience, technical depth, and target role.\n\n"
+
+    "Career-level calibration rules:\n"
+    "- Undergraduate/Fresh Graduate: Focus on fundamentals, projects, "
+    "internships, academic work, learning ability, and potential. "
+    "Do not penalize missing enterprise-level production experience.\n"
+    "- Junior Engineer: Evaluate practical skills, project quality, "
+    "coding ability, and early professional experience.\n"
+    "- Mid-Level Engineer: Evaluate ownership, system design exposure, "
+    "production experience, and technical impact.\n"
+    "- Senior Engineer: Evaluate architecture decisions, leadership, "
+    "scalability, mentoring, and large-scale production impact.\n\n"
+
+    "Do not apply senior-level expectations to junior or undergraduate candidates. "
+    "Do not lower standards for experienced candidates.\n\n"
+
+    "Never invent numerical metrics, accuracy scores, dataset sizes, latency values, "
+    "or performance improvements. Only use facts explicitly present in the resume. "
+    "If metrics are missing, use placeholders.\n\n"
+
+    "Process every project, experience entry, and skill mentioned in the resume. "
+    "Do not skip or merge projects.\n\n"
+
+    "Before marking any skill as missing, verify whether it exists anywhere in "
+    "the provided resume text.\n\n"
+
+    "Always populate every required schema field. Never return null or missing "
+    "required fields.\n\n"
+
+    f"Resume Input:\n\n{user_payload}\n\n"
+
+    "OUTPUT LENGTH CONSTRAINT: Keep every bullet point, rationale, and rewrite "
+    "concise (1-2 sentences max per field). "
+    "Prioritize complete coverage over long explanations."
+),
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT_V4_1_PRODUCTION,
                     response_mime_type="application/json",

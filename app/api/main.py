@@ -155,9 +155,15 @@ async def analyze_resume(
     target_role: Optional[str] = Form(None)
 ):
     """
-    Performs evidence-grounded FAANG recruiter audit using Gemini 3.6 Flash.
-    Accepts resume file and an optional target_role string from Form data.
-    Enforces AuditReportResponse schema including all 13 Resume Intelligence Dashboard metrics.
+
+    Confirms the upload looks like a resume, then performs an evidence-grounded
+
+    audit using our internal review engine. Accepts a resume file and an
+
+    optional target_role string from Form data. Enforces the AuditReportResponse
+
+    schema, including all 13 Resume Intelligence Dashboard metrics.
+
     """
     # Defensive filename & extension validation
     filename = (file.filename or "").lower()
@@ -203,6 +209,27 @@ async def analyze_resume(
                 ),
             )
 
+        # Run document classification before the full audit, so an upload
+        # that clearly isn't a resume gets a clear, human-friendly rejection
+        # instead of a confusing or low-quality audit.
+        classification_results = await ResumeClassifierService.classify_and_score_ai(extracted_text, {})
+
+        document_validation = {
+            "is_resume": classification_results.get("is_resume", False),
+            "confidence_score": classification_results.get("confidence_score", 0.0),
+            "detected_doc_type": classification_results.get("detected_doc_type", "Unknown"),
+        }
+
+        if not document_validation["is_resume"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "This file doesn't look like a resume or CV "
+                    f"(it looks more like: {document_validation['detected_doc_type']}). "
+                    "Please upload a resume document to run the audit."
+                ),
+            )
+
         # Execute Gemini Recruiter Intelligence Audit
         raw_analysis = await analyze_resume_text(text=extracted_text, target_role=target_role)
 
@@ -224,6 +251,7 @@ async def analyze_resume(
         # try block, so a malformed Gemini payload surfaces as a clean 400/500
         # HTTPException instead of an unhandled FastAPI ResponseValidationError
         # (which would otherwise escape this handler entirely as a raw 500).
+        analysis_dict["document_validation"] = document_validation
         try:
             validated = AuditReportResponse.model_validate(analysis_dict)
         except Exception as schema_err:
