@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any
 import fitz  # PyMuPDF
 import docx
+from PIL import Image
+import pytesseract
 
 
 def extract_text_from_txt(file_input: bytes | Path | str) -> dict[str, Any]:
@@ -93,12 +95,18 @@ def extract_text_from_pdf(file_input: bytes | Path | str) -> dict[str, Any]:
     # Detect scanned document: low readable words (< 30) while containing images OR zero text entirely
     is_scanned = (word_count < 30) and (total_images > 0 or word_count == 0)
 
-    # Reject scanned documents immediately so main.py handles it as a 400 Bad Request
     if is_scanned:
-        raise ValueError(
-            "SCANNED_DOCUMENT_DETECTED: Document appears to be image-based/scanned, "
-            "and OCR processing is currently unavailable on this server."
-        )
+        try:
+            print("Document OCR Fallback Executed")
+            extracted_text = ""
+            for page in doc:
+                pix = page.get_pixmap()
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+                extracted_text += f"{pytesseract.image_to_string(img)}\n\n"
+            word_count = len(extracted_text.split())
+            is_scanned = False  # Reset is_scanned after OCR
+        except Exception as ocr_err:
+            raise ValueError(f"OCR failed: {str(ocr_err)}") from ocr_err
 
     # 4. Append discovered URIs to the text stream so downstream entity extractors pick them up
     final_text = extracted_text

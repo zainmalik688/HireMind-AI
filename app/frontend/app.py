@@ -7,7 +7,7 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="HireMind AI V3 - FAANG Recruiter Audit",
+    page_title="HireMind V3 - FAANG Recruiter Audit",
     page_icon="⚡",
     layout="wide",
 )
@@ -568,7 +568,7 @@ def run_audit_pipeline(
 # ----------------------------------------------------
 # Sidebar Controls
 # ----------------------------------------------------
-st.sidebar.title("⚙️ System Architecture & Cache")
+st.sidebar.title("⚙️ System Configuration & Cache")
 use_mock = st.sidebar.checkbox(
     "🧪 Enable Mock Mode (Zero Token Usage)", value=False
 )
@@ -583,16 +583,15 @@ if st.sidebar.button("🗑️ Clear Local Audit Cache", use_container_width=True
 
 st.sidebar.markdown("---")
 st.sidebar.caption(
-    "💡 **Production Tip:** Enable Mock Mode to style the UI endlessly. Disable"
-    " Mock Mode only for final live API verification."
+    "💡 **Tip:** Enable Mock Mode to style the UI endlessly. Disable Mock Mode only for final live API verification."
 )
 
 
 # ----------------------------------------------------
 # Main UI Layout
 # ----------------------------------------------------
-st.title("⚡ HireMind AI ")
-st.subheader("FAANG Senior Recruiter & ATS Intelligence System")
+st.title("⚡ HireMind V3")
+st.subheader("FAANG Senior Recruiter & ATS Audit System")
 
 col_file, col_role = st.columns([1.5, 1])
 with col_file:
@@ -661,11 +660,11 @@ if st.session_state.get("active_audit"):
     # spinner, instead of looking like the click did nothing.
     audit_source = st.session_state.get("audit_source")
     if audit_source == "cached":
-        st.info("⚡ Audit Source: Cached Result (loaded instantly from local disk)")
+        st.info("⚡ Audit Source: Cached Result (loaded from local disk)")
     elif audit_source == "live":
-        st.success("🚀 Audit Source: Live Gemini Engine (freshly analyzed)")
+        st.success("🚀 Audit Source: Live Engine (freshly analyzed)")
     elif audit_source == "mock":
-        st.warning("🧪 Audit Source: Mock Data (no API call made)")
+        st.warning("🧪 Audit Source: Mock Data (no API call)")
 
     st.markdown("---")
 
@@ -701,7 +700,7 @@ if st.session_state.get("active_audit"):
         else safe_str(conf_score, "N/A")
     )
 
-    st.markdown(f"### 👤 Candidate Snapshot: **{cand_name}**")
+    st.markdown(f"### 👤 Candidate Overview: **{cand_name}**")
     
     col_snap1, col_snap2, col_snap3, col_snap4 = st.columns(4)
     col_snap1.write(f"**Doc Type:** `{class_label}`")
@@ -767,11 +766,11 @@ if st.session_state.get("active_audit"):
     # ----------------------------------------------------
     # 3. Recruiter Evidence Matrix & Critical Audit Row
     # ----------------------------------------------------
-    st.markdown("### 📋 Recruiter Evidence Matrix & Critical Audit")
+    st.markdown("### 📋 Recruiter Evidence Matrix & Critical Findings")
     col_mat, col_assess = st.columns([1, 1.2])
 
     with col_mat:
-        st.markdown("#### Requirement Verification Grid")
+        st.markdown("#### Requirement Verification")
         raw_matrix = safe_list(data.get("recruiter_evidence_matrix"))
 
         if not raw_matrix and "role_match" in data:
@@ -819,7 +818,7 @@ if st.session_state.get("active_audit"):
             st.info("Requirement verification data unavailable.")
 
     with col_assess:
-        st.markdown("#### 🚨 Critical Weaknesses & Deficits")
+        st.markdown("#### 🚨 Critical Weaknesses")
         weaknesses = safe_list(
             data.get("critical_weaknesses") or data.get("weaknesses")
         )
@@ -878,7 +877,7 @@ if st.session_state.get("active_audit"):
         render_dashboard(dashboard)
 
     with tab_exec:
-        st.markdown("### Executive Recruiter Summary")
+        st.markdown("### Executive Summary")
         exec_summary = (
             data.get("executive_summary")
             or summary_obj.get("one_line_verdict")
@@ -886,7 +885,7 @@ if st.session_state.get("active_audit"):
         )
         st.write(exec_summary)
 
-        st.markdown("### Score Justifications & ATS Deductions")
+        st.markdown("### Score Justifications & Deductions")
         ats_obj = safe_dict(card.get("ats_score"))
         tech_obj = safe_dict(card.get("technical_depth"))
         rec_obj = safe_dict(card.get("recruiter_signal"))
@@ -904,7 +903,7 @@ if st.session_state.get("active_audit"):
             f" {rec_obj.get('reason', safe_dict(dim_scores.get('structural_quality')).get('reasoning', 'N/A'))}"
         )
 
-        st.markdown("### Structure & Scan Speed Audit")
+        st.markdown("### Structure & Scan Speed Review")
         struct = safe_dict(data.get("resume_structure_review"))
         if struct:
             for k, v in struct.items():
@@ -950,7 +949,7 @@ if st.session_state.get("active_audit"):
             f" {', '.join(deduplicate_list(kw.get('suggested_keywords', ['ONNX', 'Vector DBs', 'TensorRT'])))}"
         )
 
-        st.markdown("### Recommended Next Technologies")
+        st.markdown("### Recommended Next Skills")
         next_techs = safe_list(
             tech.get("next_technologies") or tech.get("recommended_next_tech")
         )
@@ -965,7 +964,7 @@ if st.session_state.get("active_audit"):
                     )
 
     with tab_projects:
-        st.markdown("### Individual Project Audits & STAR Rewrites")
+        st.markdown("### Individual Project Audits")
         projs = safe_list(
             data.get("individual_project_reviews") or data.get("project_analysis")
         )
@@ -1003,7 +1002,7 @@ if st.session_state.get("active_audit"):
 
     with tab_bench:
         bench = safe_dict(data.get("benchmark_comparison"))
-        st.markdown("### Benchmark Pool Comparison")
+        st.markdown("### Benchmark Comparison")
         st.write(
             "**vs. Average Student Resume:**"
             f" `{bench.get('average_student_comparison', 'Excellent')}`"
@@ -1022,7 +1021,7 @@ if st.session_state.get("active_audit"):
         ).strip()
         st.markdown(f"**Qualitative Assessment:** {qualitative_text}")
 
-        st.markdown("### Hiring Risk Assessment")
+        st.markdown("### Hiring Risk Evaluation")
         risk = safe_dict(data.get("hiring_risk_assessment"))
         st.write(f"**Risk Level:** `{risk.get('risk_level', 'Low')}`")
         fallback_rejections = [
@@ -1039,7 +1038,7 @@ if st.session_state.get("active_audit"):
     with tab_action:
         plan = safe_dict(data.get("priority_action_plan"))
         
-        st.markdown("#### ⚡ Immediate Fixes (Today)")
+        st.markdown("#### ⚡ Immediate Actions (Today)")
         imm_fixes = deduplicate_list(
             safe_list(plan.get("immediate_fixes_today") or plan.get("immediate_fixes"))
             or ["Remove non-technical experience."]
@@ -1047,7 +1046,7 @@ if st.session_state.get("active_audit"):
         for f in imm_fixes:
             st.markdown(f"* {f}")
 
-        st.markdown("#### 🚀 Short-Term Improvements (This Week)")
+        st.markdown("#### 🚀 Short-Term Actions (This Week)")
         st_fixes = deduplicate_list(
             safe_list(plan.get("short_term_this_week") or plan.get("short_term_upgrades"))
             or ["Add Docker containerization proof."]
@@ -1055,7 +1054,7 @@ if st.session_state.get("active_audit"):
         for f in st_fixes:
             st.markdown(f"* {f}")
 
-        st.markdown("#### 🎯 Long-Term Improvements (This Month)")
+        st.markdown("#### 🎯 Long-Term Actions (This Month)")
         lt_fixes = deduplicate_list(
             safe_list(plan.get("long_term_this_month") or plan.get("long_term_upgrades"))
             or ["Deploy LLM service to cloud."]
@@ -1063,7 +1062,7 @@ if st.session_state.get("active_audit"):
         for f in lt_fixes:
             st.markdown(f"* {f}")
 
-        st.markdown("#### 🔝 Top 10 Highest ROI Improvements")
+        st.markdown("#### 🔝 Top 10 High ROI Improvements")
         top10 = [item for item in safe_list(data.get("top_10_highest_roi_improvements")) if isinstance(item, dict)]
         if top10:
             try:
@@ -1078,9 +1077,9 @@ if st.session_state.get("active_audit"):
         download_payload = json.dumps({"error": "Report could not be serialized."})
 
     st.download_button(
-        label="📥 Download Full Exhaustive Recruiter Analysis Report (JSON)",
+        label="📥 Download Full Audit Report (JSON)",
         data=download_payload,
-        file_name="HireMind_AI_V3_Production_Report.json",
+        file_name="HireMind_V3_Report.json",
         mime="application/json",
         use_container_width=True,
     )

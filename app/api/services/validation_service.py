@@ -72,8 +72,25 @@ class DocumentValidationService:
                     validation_message="Corrupted PDF file detected. Unable to parse structure.",
                 ), content
 
-        # 2. Check DOCX integrity
+       
+       # 2. Check DOCX integrity and password protection
         elif ext == "docx":
+            OLE_SIGNATURE = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"  # OLE2 Compound File magic bytes
+
+            # Encrypted OOXML files are repackaged as OLE2 compound files
+            # (holding an EncryptionInfo/EncryptedPackage stream) instead of
+            # a plain ZIP/OOXML package, so this signature alone reliably
+            # flags password-protected DOCX files before we even attempt
+            # to parse them with python-docx.
+            if content.startswith(OLE_SIGNATURE):
+                return FileValidationResult(
+                    is_valid=False,
+                    file_type=ext,
+                    file_size_mb=file_size_mb,
+                    is_encrypted=True,
+                    validation_message="DOCX document is password-protected. Please upload an unlocked file.",
+                ), content
+
             try:
                 Document(io.BytesIO(content))
             except Exception:

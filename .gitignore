@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 cached_audits/
+.aider*
+audit_logs/

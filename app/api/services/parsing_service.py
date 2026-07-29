@@ -221,10 +221,15 @@ class ResumeParsingEngine:
         if len(extracted_text.strip()) < 50:
             is_scanned = True
             extracted_text = ""
-            for page in doc:
-                pix = page.get_pixmap()
-                img = Image.open(io.BytesIO(pix.tobytes("png")))
-                extracted_text += f"{pytesseract.image_to_string(img)}\n\n"
+            try:
+                print("Document OCR Fallback Executed")
+                for page in doc:
+                    pix = page.get_pixmap()
+                    img = Image.open(io.BytesIO(pix.tobytes("png")))
+                    extracted_text += f"{pytesseract.image_to_string(img)}\n\n"
+            except Exception as ocr_err:
+                print(f"OCR failed: {str(ocr_err)}")
+                is_scanned = False  # Reset is_scanned if OCR fails
 
         if extracted_links:
             extracted_text += "\n\n--- EXTRACTED HYPERLINKS ---\n" + "\n".join(extracted_links)

@@ -105,10 +105,19 @@ async def parse_resume(file: UploadFile = File(...)):
         response_dict = parsed_data.model_dump() if hasattr(parsed_data, "model_dump") else parsed_data.__dict__
 
     # Early exit if the document is flagged as invalid or scanned
-    if not response_dict.get("is_valid", True) or response_dict.get("is_scanned", False):
+    validation_info = response_dict.get("validation_info", {})
+    if not validation_info.get("is_valid", True) or validation_info.get("is_scanned", False):
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content=response_dict
+        )
+
+    # 2. Validate parsed content quality
+    content_validation = DocumentValidationService.validate_parsed_content(response_dict)
+    if not content_validation["is_valid"]:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=content_validation
         )
 
     # 3. Extract Entities (Name, Contact Info, Skills)
