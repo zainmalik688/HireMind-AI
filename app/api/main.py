@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # V2 Schemas & Services
 from app.api.schemas import ParsedResumeData, AuditReportResponse
-from app.api.services.validation_service import DocumentValidationService
+from app.api.services.validation_service import DocumentValidationService, MAX_FILE_SIZE_MB
 from app.api.services.parsing_service import ResumeParsingEngine
 from app.api.services.extractor import EntityExtractor
 from app.api.services.classifier_service import ResumeClassifierService
@@ -184,6 +184,15 @@ async def analyze_resume(
     
     try:
         file_bytes = await file.read()
+
+        # Reject oversized uploads before any parsing or AI processing begins.
+        file_size_mb = len(file_bytes) / (1024 * 1024)
+        if file_size_mb > MAX_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"File exceeds maximum allowed size of {MAX_FILE_SIZE_MB}MB (uploaded file is {file_size_mb:.2f}MB).",
+            )
+
         extracted_result = extract_text_from_file(file_bytes, file.filename or "uploaded_document")
         
         # Safe extraction for both dict and string outputs from text service

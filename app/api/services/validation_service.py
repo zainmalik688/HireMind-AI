@@ -124,13 +124,45 @@ class DocumentValidationService:
         ), content
 
     @staticmethod
+  
     def validate_parsed_content(doc_result: dict[str, Any]) -> dict[str, Any]:
         """
         Validate the extracted document dictionary for
         scanned PDF detection and text content sufficiency.
+        `doc_result` is typically a `ParsedResumeData.model_dump()` payload,
+        which nests quality/validation fields under `quality_info` and
+        `validation_info` rather than exposing them at the top level. This
+        checks the top level first (for callers that pass a flat dict, e.g.
+        the V3 `pdf_service.py` output) and falls back to the nested
+        `quality_info` / `validation_info` sub-dicts otherwise.
         """
+        quality_info = doc_result.get("quality_info") or {}
+        validation_info = doc_result.get("validation_info") or {}
+
+        def _get(*, top_key: str, quality_key: str | None = None, validation_key: str | None = None, default: Any = None) -> Any:
+            if top_key in doc_result and doc_result.get(top_key) is not None:
+                return doc_result.get(top_key)
+            if quality_key and quality_key in quality_info and quality_info.get(quality_key) is not None:
+                return quality_info.get(quality_key)
+            if validation_key and validation_key in validation_info and validation_info.get(validation_key) is not None:
+                return validation_info.get(validation_key)
+            return default
+
+        is_scanned = _get(top_key="is_scanned", validation_key="is_scanned", default=False)
+        word_count = _get(top_key="word_count", quality_key="word_count", default=0)
+        char_count = _get(top_key="character_count", quality_key="char_count", default=0)
+        raw_text = (doc_result.get("raw_text") or "").strip()
+
+        # page_count / image_count / extracted_links have no nested equivalent
+        # in ParsedResumeData -- only pdf_service.py's flat V3 dict output
+        # carries them -- so these safely default when absent rather than
+        # ever raising a KeyError.
+        image_count = doc_result.get("image_count", 0)
+        page_count = doc_result.get("page_count", 1)
+        extracted_links = doc_result.get("extracted_links", [])
+
         # 1. Scanned Document Check
-        if doc_result.get("is_scanned", False):
+        if is_scanned:
             return {
                 "is_valid": False,
                 "error_code": "SCANNED_DOCUMENT_DETECTED",
@@ -139,15 +171,12 @@ class DocumentValidationService:
                     "Please upload a searchable text-based PDF, DOCX, or TXT file."
                 ),
                 "details": {
-                    "word_count": doc_result.get("word_count", 0),
-                    "image_count": doc_result.get("image_count", 0),
+                    "word_count": word_count,
+                    "image_count": image_count,
                 },
             }
 
         # 2. Empty Text Content Check
-        raw_text = doc_result.get("raw_text", "").strip()
-        word_count = doc_result.get("word_count", 0)
-
         if not raw_text or word_count == 0:
             return {
                 "is_valid": False,
@@ -171,7 +200,8 @@ class DocumentValidationService:
             "message": "Document content validation passed successfully.",
             "details": {
                 "word_count": word_count,
-                "page_count": doc_result.get("page_count", 1),
-                "has_hyperlinks": len(doc_result.get("extracted_links", [])) > 0,
+                "char_count": char_count,
+                "page_count": page_count,
+                "has_hyperlinks": len(extracted_links) > 0,
             },
         }
