@@ -5,6 +5,7 @@ import fitz  # PyMuPDF
 from docx import Document
 from fastapi import UploadFile, HTTPException
 from app.api.schemas import FileValidationResult
+from app.api.services.pdf_service import is_corrupted_text_content
 
 MAX_FILE_SIZE_MB = 10.0
 # Include extensions with and without leading dots to prevent parsing bugs
@@ -105,10 +106,18 @@ class DocumentValidationService:
         elif ext == "txt":
             try:
                 try:
-                    content.decode("utf-8")
+                    decoded_text = content.decode("utf-8")
                 except UnicodeDecodeError:
-                    content.decode("latin-1")
+                    decoded_text = content.decode("latin-1")
             except Exception:
+                return FileValidationResult(
+                    is_valid=False,
+                    file_type=ext,
+                    file_size_mb=file_size_mb,
+                    validation_message="Corrupted or unreadable TXT file encoding.",
+                ), content
+
+            if is_corrupted_text_content(decoded_text):
                 return FileValidationResult(
                     is_valid=False,
                     file_type=ext,

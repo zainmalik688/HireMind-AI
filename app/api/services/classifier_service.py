@@ -141,8 +141,11 @@ class ResumeClassifierService:
             except json.JSONDecodeError:
                 cleaned_json = cls._clean_json_string(raw_text)
                 parsed_dict = json.loads(cleaned_json)
+            
+
 
             return parsed_dict
+        
 
         except Exception as e:
             return {

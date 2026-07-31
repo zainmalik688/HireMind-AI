@@ -8,6 +8,25 @@ from PIL import Image
 import pytesseract
 
 
+def is_corrupted_text_content(text: str) -> bool:
+    """
+    Flags decoded text that doesn't actually look like readable text --
+    e.g. a binary file (image, executable, etc.) renamed to .txt, which
+    decodes "successfully" under latin-1 but isn't real content. Uses the
+    same signal `file`/`git` use to tell binary from text: NUL bytes, or
+    a high ratio of non-printable control characters.
+    """
+    if not text:
+        return False
+    if "\x00" in text:
+        return True
+    control_chars = sum(
+        1 for ch in text
+        if (ord(ch) < 32 and ch not in "\n\r\t") or ord(ch) == 127
+    )
+    return (control_chars / len(text)) > 0.05
+
+
 def extract_text_from_txt(file_input: bytes | Path | str) -> dict[str, Any]:
     """
     Extract raw text from a plain text file (.txt).
@@ -25,6 +44,9 @@ def extract_text_from_txt(file_input: bytes | Path | str) -> dict[str, Any]:
             extracted_text = path.read_text(encoding="utf-8", errors="ignore")
     except Exception as err:
         raise ValueError(f"Failed to read TXT document: {str(err)}") from err
+
+    if is_corrupted_text_content(extracted_text):
+        raise ValueError("The TXT document appears to be corrupted or unreadable.")
 
     extracted_text = extracted_text.strip()
     word_count = len(extracted_text.split())
@@ -83,30 +105,32 @@ def extract_text_from_pdf(file_input: bytes | Path | str) -> dict[str, Any]:
                 for link in links:
                     uri = link.get("uri")
                     if uri and uri.startswith(("http://", "https://", "mailto:")):
-                        if uri not in extracted_links:
+                       if uri not in extracted_links:
                             extracted_links.append(uri)
 
+            extracted_text = "\n".join(text_content).strip()
+            word_count = len(extracted_text.split())
+
+            # Detect scanned document: low readable words (< 30) while containing images OR zero text entirely
+            is_scanned = (word_count < 30) and (total_images > 0 or word_count == 0)
+
+            if is_scanned:
+                try:
+                    print("Document OCR Fallback Executed")
+                    extracted_text = ""
+                    for page in doc:
+                        pix = page.get_pixmap()
+                        img = Image.open(io.BytesIO(pix.tobytes("png")))
+                        extracted_text += f"{pytesseract.image_to_string(img)}\n\n"
+                    word_count = len(extracted_text.split())
+                    is_scanned = False  # Reset is_scanned after OCR
+                except Exception as ocr_err:
+                    raise ValueError(f"OCR failed: {str(ocr_err)}") from ocr_err
+
+    except ValueError:
+        raise
     except Exception as err:
         raise ValueError(f"Failed to parse PDF document: {str(err)}") from err
-
-    extracted_text = "\n".join(text_content).strip()
-    word_count = len(extracted_text.split())
-
-    # Detect scanned document: low readable words (< 30) while containing images OR zero text entirely
-    is_scanned = (word_count < 30) and (total_images > 0 or word_count == 0)
-
-    if is_scanned:
-        try:
-            print("Document OCR Fallback Executed")
-            extracted_text = ""
-            for page in doc:
-                pix = page.get_pixmap()
-                img = Image.open(io.BytesIO(pix.tobytes("png")))
-                extracted_text += f"{pytesseract.image_to_string(img)}\n\n"
-            word_count = len(extracted_text.split())
-            is_scanned = False  # Reset is_scanned after OCR
-        except Exception as ocr_err:
-            raise ValueError(f"OCR failed: {str(ocr_err)}") from ocr_err
 
     # 4. Append discovered URIs to the text stream so downstream entity extractors pick them up
     final_text = extracted_text

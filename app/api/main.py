@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()  # Must run before importing services using env vars
 
 import json
+import fitz  # PyMuPDF -- used for the pre-extraction PDF encryption check in /analyze
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
 from fastapi.responses import JSONResponse
@@ -188,10 +189,38 @@ async def analyze_resume(
         # Reject oversized uploads before any parsing or AI processing begins.
         file_size_mb = len(file_bytes) / (1024 * 1024)
         if file_size_mb > MAX_FILE_SIZE_MB:
-            raise HTTPException(
+           raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"File exceeds maximum allowed size of {MAX_FILE_SIZE_MB}MB (uploaded file is {file_size_mb:.2f}MB).",
             )
+
+        # Detect password-protected documents before any text extraction or
+        # OCR begins. Mirrors the same checks DocumentValidationService
+        # already performs for /api/v1/parse-resume; duplicated here in
+        # minimal, self-contained form since /analyze reads file bytes
+        # directly rather than going through that service.
+        if filename.endswith(".pdf"):
+            try:
+                _pdf_check_doc = fitz.open(stream=file_bytes, filetype="pdf")
+                _is_pdf_encrypted = _pdf_check_doc.is_encrypted
+                _pdf_check_doc.close()
+            except Exception:
+                # Not an encryption issue -- leave any genuine corruption to
+                # be handled by the existing extraction/error-handling below,
+                # unchanged.
+                _is_pdf_encrypted = False
+            if _is_pdf_encrypted:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="This PDF is password-protected and must be unlocked before uploading.",
+                )
+        elif filename.endswith(".docx"):
+            OLE_SIGNATURE = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"  # OLE2 Compound File magic bytes
+            if file_bytes.startswith(OLE_SIGNATURE):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="This DOCX document is password-protected and must be unlocked before uploading.",
+                )
 
         extracted_result = extract_text_from_file(file_bytes, file.filename or "uploaded_document")
         
@@ -206,17 +235,24 @@ async def analyze_resume(
         else:
             extracted_text = str(extracted_result) if extracted_result else ""
         
-        if not extracted_text or not extracted_text.strip():
+        # Reuse the same content-quality validation V2 already relies on
+        # (empty text / scanned document / minimum content) instead of
+        # re-checking a subset of the same conditions here.
+        content_validation = DocumentValidationService.validate_parsed_content(
+            extracted_result if isinstance(extracted_result, dict)
+            else {"raw_text": extracted_text, "word_count": len(extracted_text.split())}
+        )
+        if not content_validation["is_valid"]:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, 
-                detail="Could not extract readable text from the document."
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=content_validation["message"],
             )
 
-        # Reject extremely short documents up front with an actionable message
-        # rather than sending near-empty content to Gemini, which tends to
-        # produce a nonsensical or malformed audit instead of a clean error.
+        # Reject documents that are technically non-empty but still too short
+        # to evaluate meaningfully as a resume (an audit needs more content
+        # than a basic parse), on top of the baseline check above.
         MIN_WORD_COUNT = 30
-        word_count = len(extracted_text.split())
+        word_count = content_validation["details"]["word_count"]
         if word_count < MIN_WORD_COUNT:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -275,10 +311,7 @@ async def analyze_resume(
         except Exception as schema_err:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=(
-                    "The AI service returned a response that did not match the "
-                    f"expected audit schema: {str(schema_err)}"
-                ),
+                detail="We ran into a problem generating your resume report. Please try again in a moment.",
             )
 
         return validated
@@ -293,15 +326,15 @@ async def analyze_resume(
     except ValueError as ve:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
-            detail=str(ve)
+            detail="We couldn't process this file. Please make sure it's a valid, unlocked PDF, DOCX, or TXT document and try again."
         )
     except json.JSONDecodeError as jde:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail=f"Failed to parse audit JSON response: {str(jde)}"
+            detail="We ran into a problem generating your resume report. Please try again in a moment."
         )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail=f"Server error: {str(e)}"
+            detail="Something went wrong on our end. Please try again shortly."
         )

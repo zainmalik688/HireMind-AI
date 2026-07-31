@@ -695,7 +695,7 @@ if st.session_state.get("active_audit"):
     conf_score = val_doc.get("confidence_score", 0.95)
     class_label = "✅ Valid Resume" if is_resume else "❌ Non-Resume Document"
     conf_pct = (
-        f"{int(safe_number(conf_score, 0.95) * 100)}%"
+        f"{safe_number(conf_score, 95):.0f}%"
         if isinstance(conf_score, (int, float)) and not isinstance(conf_score, bool)
         else safe_str(conf_score, "N/A")
     )
