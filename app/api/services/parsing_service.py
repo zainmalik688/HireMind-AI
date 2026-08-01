@@ -228,8 +228,7 @@ class ResumeParsingEngine:
                     img = Image.open(io.BytesIO(pix.tobytes("png")))
                     extracted_text += f"{pytesseract.image_to_string(img)}\n\n"
             except Exception as ocr_err:
-                print(f"OCR failed: {str(ocr_err)}")
-                is_scanned = False  # Reset is_scanned if OCR fails
+                raise ValueError("OCR could not read the scanned PDF.") from ocr_err
 
         if extracted_links:
             extracted_text += "\n\n--- EXTRACTED HYPERLINKS ---\n" + "\n".join(extracted_links)
