@@ -11,10 +11,12 @@ load_dotenv()  # Must run before importing services using env vars
 
 import json
 import fitz  # PyMuPDF -- used for the pre-extraction PDF encryption check in /analyze
+
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+
 
 # V2 Schemas & Services
 from app.api.schemas import ParsedResumeData, AuditReportResponse
@@ -22,6 +24,7 @@ from app.api.services.validation_service import DocumentValidationService, MAX_F
 from app.api.services.parsing_service import ResumeParsingEngine
 from app.api.services.extractor import EntityExtractor
 from app.api.services.classifier_service import ResumeClassifierService
+from app.api.utils.text_cleaner import TextCleaner
 
 # V1/V3 Services
 from app.api.services.pdf_service import extract_text_from_file
@@ -234,6 +237,8 @@ async def analyze_resume(
             )
         else:
             extracted_text = str(extracted_result) if extracted_result else ""
+
+        extracted_text = TextCleaner.clean_resume_text(extracted_text)
         
         # Reuse the same content-quality validation V2 already relies on
         # (empty text / scanned document / minimum content) instead of
