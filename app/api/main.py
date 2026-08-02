@@ -24,6 +24,7 @@ from app.api.services.validation_service import DocumentValidationService, MAX_F
 from app.api.services.parsing_service import ResumeParsingEngine
 from app.api.services.extractor import EntityExtractor
 from app.api.services.classifier_service import ResumeClassifierService
+from app.api.services.ats_scoring_engine import compute_ats_score, StaticKeywordProvider
 from app.api.utils.text_cleaner import TextCleaner
 
 # V1/V3 Services
@@ -239,7 +240,10 @@ async def analyze_resume(
             extracted_text = str(extracted_result) if extracted_result else ""
 
         extracted_text = TextCleaner.clean_resume_text(extracted_text)
-        
+        try:
+            extracted_entities = EntityExtractor.parse_all(extracted_text)
+        except Exception:
+            extracted_entities = {}
         # Reuse the same content-quality validation V2 already relies on
         # (empty text / scanned document / minimum content) instead of
         # re-checking a subset of the same conditions here.
@@ -305,7 +309,30 @@ async def analyze_resume(
             raise ValueError(
                 "AI Service returned an unexpected payload shape (expected a JSON object)."
             )
+        try:
+            ats_result = compute_ats_score(
+                text=extracted_text,
+                entities=extracted_entities,
+                extraction_result=extracted_result if isinstance(extracted_result, dict) else {},
+                keyword_provider=StaticKeywordProvider(EntityExtractor.SKILLS_DB),
+                target_role=target_role,
+            )
+        except Exception:
+            ats_result = {
+                "score": 0,
+                "breakdown": {"formatting": 0, "keywords": 0, "structure": 0, "achievements": 0, "ats_compatibility": 0},
+                "reason": "Deterministic ATS scoring could not be completed for this document.",
+            }
 
+        ats_score_payload = {
+            "score": ats_result["score"],
+            "breakdown": ats_result["breakdown"],
+            "reason_not_higher": ats_result["reason"],
+        }
+        if isinstance(analysis_dict.get("explainable_scorecard"), dict):
+            analysis_dict["explainable_scorecard"]["ats_score"] = ats_score_payload
+        else:
+            analysis_dict["explainable_scorecard"] = {"ats_score": ats_score_payload}
         # Explicitly validate against the response schema here, inside the
         # try block, so a malformed Gemini payload surfaces as a clean 400/500
         # HTTPException instead of an unhandled FastAPI ResponseValidationError
