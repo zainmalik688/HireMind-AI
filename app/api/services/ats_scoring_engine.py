@@ -38,6 +38,13 @@ from __future__ import annotations
 
 import re
 from typing import Any, Optional, Protocol
+from dataclasses import dataclass
+@dataclass
+class CategoryDetail:
+    category: str
+    points: int
+    max_points: int
+    evidence: dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
