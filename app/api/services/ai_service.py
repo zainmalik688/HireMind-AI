@@ -13,6 +13,7 @@ logic at the bottom stays short and readable:
 """
 
 import os
+import time
 import re
 import json
 import asyncio
@@ -804,11 +805,18 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
     # Generate JSON schema dict and sanitize additionalProperties for Gemini API mode compatibility
     raw_schema = AuditReportResponse.model_json_schema()
     sanitized_schema = sanitize_schema_for_gemini(raw_schema)
+    overall_start = time.perf_counter()
 
     for attempt in range(max_retries):
         try:
             # Native async execution using client.aio with the configured model
             # & sanitized Pydantic structured output schema
+            gemini_start = time.perf_counter()
+
+            logger.info(
+                f"[ATTEMPT {attempt + 1}] Starting Gemini request..."
+                f"(model={GEMINI_MODEL})..."
+            )
             response = await client.aio.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=(
@@ -848,6 +856,7 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
     "OUTPUT LENGTH CONSTRAINT: Keep every bullet point, rationale, and rewrite "
     "concise (1-2 sentences max per field). "
     "Prioritize complete coverage over long explanations."
+    
 ),
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT_V4_1_PRODUCTION,
@@ -857,11 +866,31 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
                     max_output_tokens=16384,  # <--- Raised from 8192; large resumes with many projects were hitting the old ceiling mid-string
                 )
             )
+            gemini_end = time.perf_counter()
+
+            logger.info(
+                f"[ATTEMPT {attempt + 1}] Gemini completed in "
+                f"{gemini_end - gemini_start:.2f} seconds"
+            )
+            logger.info(
+                f"[ATTEMPT {attempt + 1}] Response size: "
+                f"{len(response.text):,} characters"
+             ) 
+
 
             # response_mime_type="application/json" + response_schema guarantees
             # raw, unfenced JSON in structured-output mode, so no markdown
             # stripping is needed here.
+            json_start = time.perf_counter()
+
             parsed_content = json.loads(response.text)
+
+            json_end = time.perf_counter()
+
+            logger.info(
+                f"[ATTEMPT {attempt + 1}] JSON parsing completed in "
+                f"{json_end - json_start:.4f} seconds"
+            )
 
             # Apply the deterministic keyword-grounding (Problem 3),
             # metric-grounding (Problem 4), and scorecard mathematical
@@ -875,18 +904,58 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
             # source, so a malformed or incomplete generation is caught with a
             # clear, typed error instead of surfacing later as an opaque
             # FastAPI response_model validation failure.
+            validation_start = time.perf_counter()
+
+            
+
             validated_report = AuditReportResponse.model_validate(parsed_content)
+
+            validation_end = time.perf_counter()
+
+            logger.info(
+                f"[VALIDATION] Completed in "
+                f"{validation_end - validation_start:.4f} seconds"
+            )
+
+           
+
+            logger.info(
+                f"[ATTEMPT {attempt + 1}] Pydantic validation completed in "
+                f"{validation_end - validation_start:.4f} seconds"
+            )
             return validated_report.model_dump(mode="json")
 
         except json.JSONDecodeError as jde:
+            logger.warning(
+                f"[ATTEMPT {attempt + 1}] JSONDecodeError triggered."
+            )
             logger.warning(f"Gemini output JSON decode failed on attempt {attempt + 1}/{max_retries}: {jde}")
             try:
+                repair_start = time.perf_counter()
+
+                logger.warning("[JSON REPAIR] Starting repair...")
+
                 repaired_text = _repair_truncated_json(response.text)
+
+                repair_end = time.perf_counter()
+
+                logger.info(
+                    f"[JSON REPAIR] Completed in {repair_end - repair_start:.4f} seconds"
+                )
                 parsed_content = json.loads(repaired_text)
                 parsed_content = _apply_keyword_grounding_fix(parsed_content, text)
                 parsed_content = _apply_star_rewrite_metric_safeguard(parsed_content, text)
                 parsed_content = _apply_scorecard_mathematical_alignment(parsed_content)
+                validation_start = time.perf_counter()
+
                 validated_report = AuditReportResponse.model_validate(parsed_content)
+
+                validation_end = time.perf_counter()
+
+                logger.info(
+                    f"[VALIDATION - REPAIRED JSON] Completed in "
+                    f"{validation_end - validation_start:.4f} seconds"
+                )
                 logger.warning("Recovered a truncated/malformed Gemini response via best-effort JSON repair.")
                 return validated_report.model_dump(mode="json")
             except Exception as repair_err:
@@ -905,6 +974,9 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
 
         except errors.APIError as api_err:
             logger.warning(
+                f"[ATTEMPT {attempt + 1}] APIError triggered."
+            )
+            logger.warning(
                 f"Gemini API error on attempt {attempt + 1}/{max_retries}: "
                 f"code={api_err.code} status={api_err.status} message={api_err.message}"
             )
@@ -916,6 +988,9 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
             ) from api_err
 
         except Exception as e:
+            logger.warning(
+                f"[ATTEMPT {attempt + 1}] Generic Exception triggered."
+            )
             # Catch-all for anything not covered above (e.g. a raw network/transport
             # failure not wrapped by the SDK as an APIError). Still retried with
             # backoff so a transient connection issue doesn't fail the whole audit.

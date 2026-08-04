@@ -10,10 +10,17 @@ from dotenv import load_dotenv
 load_dotenv()  # Must run before importing services using env vars
 
 import json
-import fitz  # PyMuPDF -- used for the pre-extraction PDF encryption check in /analyze
+import fitz
+import time
+
+DEBUG_PERF = True
+
+def _perf(label: str, start: float) -> None:
+    if DEBUG_PERF:
+        print(f"[PERF] {label}: {time.perf_counter() - start:.2f}s")
 
 from typing import Optional
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status  # PyMuPDF -- used for the pre-extraction PDF encryption check in /analyze
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -179,6 +186,7 @@ async def analyze_resume(
     schema, including all 13 Resume Intelligence Dashboard metrics.
 
     """
+    _t_total = time.perf_counter()
     # Defensive filename & extension validation
     filename = (file.filename or "").lower()
     if not filename.endswith((".pdf", ".docx", ".txt")):
@@ -226,7 +234,9 @@ async def analyze_resume(
                     detail="This DOCX document is password-protected and must be unlocked before uploading.",
                 )
 
+        _t0 = time.perf_counter()
         extracted_result = extract_text_from_file(file_bytes, file.filename or "uploaded_document")
+        _perf("PDF Extraction", _t0)
         
         # Safe extraction for both dict and string outputs from text service
         if isinstance(extracted_result, dict):
@@ -239,11 +249,17 @@ async def analyze_resume(
         else:
             extracted_text = str(extracted_result) if extracted_result else ""
 
+        _t0 = time.perf_counter()
         extracted_text = TextCleaner.clean_resume_text(extracted_text)
+        _perf("Text Cleaning", _t0)
+        _t0 = time.perf_counter()
+
         try:
-            extracted_entities = EntityExtractor.parse_all(extracted_text)
+          extracted_entities = EntityExtractor.parse_all(extracted_text)
         except Exception:
-            extracted_entities = {}
+          extracted_entities = {}
+
+        _perf("Entity Extraction", _t0)
         # Reuse the same content-quality validation V2 already relies on
         # (empty text / scanned document / minimum content) instead of
         # re-checking a subset of the same conditions here.
@@ -294,7 +310,14 @@ async def analyze_resume(
             )
 
         # Execute Gemini Recruiter Intelligence Audit
-        raw_analysis = await analyze_resume_text(text=extracted_text, target_role=target_role)
+        _t0 = time.perf_counter()
+
+        raw_analysis = await analyze_resume_text(
+            text=extracted_text,
+            target_role=target_role
+        )
+
+        _perf("Gemini API", _t0)
 
         # Parse return payload cleanly into native JSON dict
         if isinstance(raw_analysis, str):
@@ -309,6 +332,7 @@ async def analyze_resume(
             raise ValueError(
                 "AI Service returned an unexpected payload shape (expected a JSON object)."
             )
+        _t0 = time.perf_counter()
         try:
             ats_result = compute_ats_score(
                 text=extracted_text,
@@ -323,6 +347,7 @@ async def analyze_resume(
                 "breakdown": {"formatting": 0, "keywords": 0, "structure": 0, "achievements": 0, "ats_compatibility": 0},
                 "reason": "Deterministic ATS scoring could not be completed for this document.",
             }
+        _perf("ATS Engine", _t0)
 
         ats_score_payload = {
             "score": ats_result["score"],
@@ -338,6 +363,7 @@ async def analyze_resume(
         # HTTPException instead of an unhandled FastAPI ResponseValidationError
         # (which would otherwise escape this handler entirely as a raw 500).
         analysis_dict["document_validation"] = document_validation
+        _t0 = time.perf_counter()
         try:
             validated = AuditReportResponse.model_validate(analysis_dict)
         except Exception as schema_err:
@@ -345,6 +371,8 @@ async def analyze_resume(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="We ran into a problem generating your resume report. Please try again in a moment.",
             )
+        _perf("JSON Validation", _t0)
+        _perf("Total Request", _t_total)
 
         return validated
 
