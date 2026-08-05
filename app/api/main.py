@@ -12,6 +12,9 @@ load_dotenv()  # Must run before importing services using env vars
 import json
 import fitz
 import time
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 DEBUG_PERF = True
 
@@ -151,7 +154,19 @@ async def parse_resume(file: UploadFile = File(...)):
     # is expected here -- but the call is still guarded for defense in depth
     # against a future change to that service dropping its own handling.
     try:
-        classification_results = await ResumeClassifierService.classify_and_score_ai(cleaned_text, extracted_entities)
+        classifier_start = time.perf_counter()
+
+        classification_results = await ResumeClassifierService.classify_and_score_ai(
+            cleaned_text,
+            extracted_entities
+        )
+
+        classifier_end = time.perf_counter()
+
+        logger.info(
+            f"[CLASSIFIER] Completed in "
+            f"{classifier_end - classifier_start:.2f} seconds"
+        )
     except Exception as err:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -291,7 +306,19 @@ async def analyze_resume(
         # Run document classification before the full audit, so an upload
         # that clearly isn't a resume gets a clear, human-friendly rejection
         # instead of a confusing or low-quality audit.
-        classification_results = await ResumeClassifierService.classify_and_score_ai(extracted_text, {})
+        classifier_start = time.perf_counter()
+
+        classification_results = await ResumeClassifierService.classify_and_score_ai(
+            extracted_text,
+            {}
+        )
+
+        classifier_end = time.perf_counter()
+
+        logger.info(
+            f"[CLASSIFIER] Completed in "
+            f"{classifier_end - classifier_start:.2f} seconds"
+        )
 
         document_validation = {
             "is_resume": classification_results.get("is_resume", False),
