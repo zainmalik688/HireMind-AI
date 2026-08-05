@@ -111,15 +111,14 @@ NON-NEGOTIABLE AUDIT RULES
 
 4. STRICT SCORING MATHEMATICAL ALIGNMENT (CRITICAL — HARD BOUNDS, not suggestions):
    - Scores MUST strictly match the identified red flags for the targeted track. Do NOT give scores above 80/100 if major core gaps exist.
-   - ATS BREAKDOWN ALIGNMENT: `ats_score.breakdown` has five point categories with fixed maximums that sum to exactly 100: formatting (0-15), keywords (0-25), structure (0-20), achievements (0-25), ats_compatibility (0-15). Assign each category honestly based on evidence, then set `ats_score.score` equal to the sum of all five category points — the score is a computed total, not an independent estimate. (A deterministic Python-side pass re-sums and overrides this after generation regardless, so this MUST be internally consistent in your own output to avoid an unexplained score change.)
+   - ATS BREAKDOWN ALIGNMENT: `ats_score.breakdown` has five point categories with fixed maximums that sum to exactly 100: formatting (0-15), keywords (0-25), structure (0-20), achievements (0-25), ats_compatibility (0-15). Assign each category honestly based on evidence, then set `ats_score.score` equal to the sum of all five category points — the score is a computed total, not an independent estimate. Keep breakdown and score internally consistent.
    - DEDUCTION MATRIX (governs how you allocate the breakdown points above and the technical_depth/recruiter_signal scores):
      * Missing Cloud (AWS/GCP/Azure): Deduct 5-8 points from `keywords`/`ats_compatibility` and from `technical_depth.score`.
      * Missing Containerization (Docker/K8s): Deduct 5-8 points from `technical_depth.score`.
      * Missing Quantified Metrics (%/$ numbers): Deduct 10-15 points from `achievements` and from `recruiter_signal.score`.
      * Missing Industry/Internship Experience: Cap `overall_hiring_score.score` at 75-80 MAX for Senior/FAANG tracks.
-   - HARD CAP — RED FLAG THRESHOLD: If `recruiter_evidence_matrix` contains 3 or more rows with status "Not Found" or "Limited", `overall_hiring_score.score` MUST NOT exceed 75/100, and `interview_probability` MUST NOT exceed 50%. These are hard ceilings, not soft targets — do not output 76+ or "55%" under this condition.
+   - HARD CAP — RED FLAG THRESHOLD: If `recruiter_evidence_matrix` contains 3 or more rows with status "Not Found" or "Limited", `overall_hiring_score.score` MUST NOT exceed 75/100, and `interview_probability` MUST NOT exceed 50%. These are non-negotiable hard ceilings — do not output 76+ or "55%" under this condition.
    - HARD CAP — ELIGIBILITY FAILURE: IF `eligibility_check.status` == "FAILED" (DOMAIN_MISMATCH = TRUE): `overall_hiring_score.score` MUST NOT exceed 30/100 and `interview_probability` MUST NOT exceed 5% against TARGET_ROLE, regardless of resume quality — the mismatch itself is the disqualifying factor, not resume polish. This cap is stricter than and overrides the red-flag-threshold cap above whenever both conditions are true.
-   - These two hard caps are enforced a second time by a deterministic Python-side safeguard after generation (`_apply_scorecard_mathematical_alignment`), so treat them as non-negotiable rather than as guidance you might round past.
 
 5. ZERO DUPLICATED TEXT / UNIQUE ROW MANDATE (CRITICAL):
    - EVERY single row in `recruiter_evidence_matrix` MUST have unique, distinct, and field-specific notes.
@@ -187,7 +186,7 @@ NON-NEGOTIABLE AUDIT RULES
 =========================================================
 REQUIRED JSON OUTPUT SCHEMA
 =========================================================
-You MUST respond ONLY with a valid single JSON object (no markdown formatting, no plain text wrapper, no codeblock tags):
+Required JSON output shape (populate all fields; structured output schema also enforced):
 
 {
   "candidate_snapshot": {
@@ -820,9 +819,6 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
             response = await client.aio.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=(
-    "Perform a clear, evidence-based candidate review. "
-    "Evaluate the candidate according to their detected career level, "
-    "years of experience, technical depth, and target role.\n\n"
 
     "Career-level calibration rules:\n"
     "- Undergraduate/Fresh Graduate: Focus on fundamentals, projects, "
@@ -838,18 +834,6 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
     "Do not apply senior-level expectations to junior or undergraduate candidates. "
     "Do not lower standards for experienced candidates.\n\n"
 
-    "Never invent numerical metrics, accuracy scores, dataset sizes, latency values, "
-    "or performance improvements. Only use facts explicitly present in the resume. "
-    "If metrics are missing, use placeholders.\n\n"
-
-    "Process every project, experience entry, and skill mentioned in the resume. "
-    "Do not skip or merge projects.\n\n"
-
-    "Before marking any skill as missing, verify whether it exists anywhere in "
-    "the provided resume text.\n\n"
-
-    "Always populate every required schema field. Never return null or missing "
-    "required fields.\n\n"
 
     f"Resume Input:\n\n{user_payload}\n\n"
 
@@ -923,6 +907,12 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
                 f"[ATTEMPT {attempt + 1}] Pydantic validation completed in "
                 f"{validation_end - validation_start:.4f} seconds"
             )
+            overall_end = time.perf_counter()
+
+            logger.info(
+                f"[TOTAL AI SERVICE] Completed in "
+                f"{overall_end - overall_start:.2f} seconds"
+            )
             return validated_report.model_dump(mode="json")
 
         except json.JSONDecodeError as jde:
@@ -957,6 +947,12 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
                     f"{validation_end - validation_start:.4f} seconds"
                 )
                 logger.warning("Recovered a truncated/malformed Gemini response via best-effort JSON repair.")
+                overall_end = time.perf_counter()
+
+                logger.info(
+                    f"[TOTAL AI SERVICE] Completed in "
+                    f"{overall_end - overall_start:.2f} seconds"
+                )
                 return validated_report.model_dump(mode="json")
             except Exception as repair_err:
                 logger.warning(f"JSON repair also failed on attempt {attempt + 1}/{max_retries}: {repair_err}")
