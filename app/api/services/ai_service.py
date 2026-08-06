@@ -18,7 +18,7 @@ import re
 import json
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 from pydantic import ValidationError
@@ -52,6 +52,12 @@ logger = logging.getLogger(__name__)
 # HTTP-equivalent status codes from the Gemini API that are safe to retry with
 # exponential backoff (rate limiting and transient server-side failures).
 _RETRYABLE_API_STATUS_CODES = {429, 500, 503}
+
+# Without an explicit timeout, the underlying SDK passes timeout=None straight
+# through to httpx/aiohttp, meaning a stalled Gemini call can hang forever with
+# no bound. 120s is a starting point for this workload (large structured-output
+# audits); tune to match whatever request budget sits in front of this service.
+_GEMINI_REQUEST_TIMEOUT_MS = 120_000
 
 # =============================================================================
 # 2. SYSTEM PROMPT
@@ -287,21 +293,21 @@ Required JSON output shape (populate all fields; structured output schema also e
   ],
   "recruiter_evidence_matrix": [
     {"requirement": "AI / ML Projects", "status": "Verified | Partial | Mentioned Once | Limited | Not Found", "evidence_note": "Specific quote or evidence note unique to core ML modeling"},
-    {"requirement": "Production Experience", "status": "Verified | Partial | Mentioned Once | Limited | Not Found", "evidence_note": "Specific note unique to production runtime or scale"},
-    {"requirement": "Cloud Experience (AWS/GCP)", "status": "Verified | Partial | Mentioned Once | Limited | Not Found", "evidence_note": "Specific note on cloud infrastructure or 'No cloud platform mentioned in resume'"},
-    {"requirement": "Containerization / Docker", "status": "Verified | Partial | Mentioned Once | Limited | Not Found", "evidence_note": "Specific note on Docker/K8s usage or 'No containerization mentioned'"},
-    {"requirement": "Research Experience", "status": "Verified | Partial | Mentioned Once | Limited | Not Found", "evidence_note": "Specific note unique to papers, literature, or benchmarking"},
-    {"requirement": "Leadership / Community", "status": "Verified | Partial | Mentioned Once | Limited | Not Found", "evidence_note": "Specific note unique to workshops, speaking, or organizing events"},
-    {"requirement": "Open Source Contributions", "status": "Verified | Partial | Mentioned Once | Limited | Not Found", "evidence_note": "Specific note on open source repos or 'No open source contributions found'"},
-    {"requirement": "Model Deployment / APIs", "status": "Verified | Partial | Mentioned Once | Limited | Not Found", "evidence_note": "Specific note unique to FastAPI, Flask, or web APIs"},
-    {"requirement": "Quantified Metrics (% / $)", "status": "Verified | Partial | Mentioned Once | Limited | Not Found", "evidence_note": "Specific evaluation of numeric outcomes present in bullets"},
-    {"requirement": "Internship Experience", "status": "Verified | Partial | Mentioned Once | Limited | Not Found", "evidence_note": "Specific note on industry work experience or 'No corporate internship listed'"}
+    {"requirement": "Production Experience", "status": "Verified", "evidence_note": "Specific note unique to production runtime or scale"},
+    {"requirement": "Cloud Experience (AWS/GCP)", "status": "Verified", "evidence_note": "Specific note on cloud infrastructure or 'No cloud platform mentioned in resume'"},
+    {"requirement": "Containerization / Docker", "status": "Verified", "evidence_note": "Specific note on Docker/K8s usage or 'No containerization mentioned'"},
+    {"requirement": "Research Experience", "status": "Verified", "evidence_note": "Specific note unique to papers, literature, or benchmarking"},
+    {"requirement": "Leadership / Community", "status": "Verified", "evidence_note": "Specific note unique to workshops, speaking, or organizing events"},
+    {"requirement": "Open Source Contributions", "status": "Verified", "evidence_note": "Specific note on open source repos or 'No open source contributions found'"},
+    {"requirement": "Model Deployment / APIs", "status": "Verified", "evidence_note": "Specific note unique to FastAPI, Flask, or web APIs"},
+    {"requirement": "Quantified Metrics (% / $)", "status": "Verified", "evidence_note": "Specific evaluation of numeric outcomes present in bullets"},
+    {"requirement": "Internship Experience", "status": "Verified", "evidence_note": "Specific note on industry work experience or 'No corporate internship listed'"}
   ],
   "resume_structure_review": {
     "section_order": {"rating": "Needs Improvement | Average | Above Average | Excellent", "reason": "Detailed section ordering review", "improvement": "Exact fix"},
-    "formatting_and_readability": {"rating": "Needs Improvement | Average | Above Average | Excellent", "reason": "Detailed formatting review", "improvement": "Exact fix"},
-    "bullet_consistency": {"rating": "Needs Improvement | Average | Above Average | Excellent", "reason": "Action verb & punctuation review", "improvement": "Exact fix"},
-    "recruiter_6sec_scan": {"rating": "Needs Improvement | Average | Above Average | Excellent", "reason": "6-second scan review", "improvement": "Exact fix"}
+    "formatting_and_readability": {"rating": "Above Average", "reason": "Detailed formatting review", "improvement": "Exact fix"},
+    "bullet_consistency": {"rating": "Above Average", "reason": "Action verb & punctuation review", "improvement": "Exact fix"},
+    "recruiter_6sec_scan": {"rating": "Above Average", "reason": "6-second scan review", "improvement": "Exact fix"}
   },
   "ats_keyword_analysis": {
     "strong_keywords": ["Keyword 1", "Keyword 2", "Keyword 3", "Keyword 4", "Keyword 5"],
@@ -350,8 +356,8 @@ Required JSON output shape (populate all fields; structured output schema also e
   ],
   "benchmark_comparison": {
     "average_student_comparison": "Needs Improvement | Average | Above Average | Excellent",
-    "strong_ai_graduate_comparison": "Needs Improvement | Average | Above Average | Excellent",
-    "faang_level_comparison": "Needs Improvement | Average | Above Average | Excellent",
+    "strong_ai_graduate_comparison": "Above Average",
+    "faang_level_comparison": "Above Average",
     "qualitative_summary": "Qualitative benchmarking narrative contrasting candidate against target role applicant pools."
   },
   "hiring_risk_assessment": {
@@ -510,6 +516,11 @@ def sanitize_schema_for_gemini(schema: dict) -> dict:
         for item in schema:
             sanitize_schema_for_gemini(item)
     return schema
+
+# AuditReportResponse's JSON schema is static (a pure function of the model
+# class definition), so it is generated and sanitized once at import time
+# rather than being recomputed on every analyze_resume_text() call.
+_SANITIZED_RESPONSE_SCHEMA = sanitize_schema_for_gemini(AuditReportResponse.model_json_schema())
 
 # =============================================================================
 # 5. POST-PROCESSING SAFEGUARDS
@@ -785,7 +796,7 @@ def _repair_truncated_json(raw_text: str) -> str:
     return text + "".join("}" if b == "{" else "]" for b in reversed(stack))
 
 
-async def analyze_resume_text(text: str, target_role: str = None, max_retries: int = 3) -> dict:
+async def analyze_resume_text(text: str, target_role: Optional[str] = None, max_retries: int = 3) -> dict:
     """
     Sends extracted resume text to Gemini for a Production FAANG Audit and
     returns a fully validated, plain-dict representation of AuditReportResponse.
@@ -801,9 +812,6 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
     if target_role and target_role.strip():
         user_payload += f"\n\nTARGET_ROLE:\n{target_role.strip()}"
 
-    # Generate JSON schema dict and sanitize additionalProperties for Gemini API mode compatibility
-    raw_schema = AuditReportResponse.model_json_schema()
-    sanitized_schema = sanitize_schema_for_gemini(raw_schema)
     overall_start = time.perf_counter()
 
     for attempt in range(max_retries):
@@ -845,9 +853,10 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT_V4_1_PRODUCTION,
                     response_mime_type="application/json",
-                    response_schema=sanitized_schema,  # <--- Cleaned schema satisfies Gemini Developer API mode
+                    response_schema=_SANITIZED_RESPONSE_SCHEMA,  # <--- Cleaned schema satisfies Gemini Developer API mode
                     temperature=0.1,
                     max_output_tokens=16384,  # <--- Raised from 8192; large resumes with many projects were hitting the old ceiling mid-string
+                    http_options=types.HttpOptions(timeout=_GEMINI_REQUEST_TIMEOUT_MS),
                 )
             )
             gemini_end = time.perf_counter()
@@ -856,6 +865,18 @@ async def analyze_resume_text(text: str, target_role: str = None, max_retries: i
                 f"[ATTEMPT {attempt + 1}] Gemini completed in "
                 f"{gemini_end - gemini_start:.2f} seconds"
             )
+
+            if not response.text:
+                # response.text is None whenever Gemini returns no text parts
+                # (content blocked by safety filters, empty candidates, or a
+                # finish_reason with no text produced). Fail fast with a clear,
+                # diagnosable error instead of crashing below on `len(None)`
+                # and burning all retry attempts on a non-retryable condition.
+                raise ValueError(
+                    f"Gemini returned no text content on attempt {attempt + 1} "
+                    f"(response may have been blocked or empty)."
+                )
+
             logger.info(
                 f"[ATTEMPT {attempt + 1}] Response size: "
                 f"{len(response.text):,} characters"
