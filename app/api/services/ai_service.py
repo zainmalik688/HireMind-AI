@@ -796,6 +796,52 @@ def _repair_truncated_json(raw_text: str) -> str:
     return text + "".join("}" if b == "{" else "]" for b in reversed(stack))
 
 
+def _format_latency_report(stage_seconds: dict) -> str:
+    """
+    Pure formatting helper for the AI Latency Profile report (profiling only
+    -- no business logic, no effect on the returned analysis).
+
+    `stage_seconds` must contain ONLY numeric durations (seconds) or None,
+    keyed by the fixed stage names below. This function never receives, logs,
+    or has any access to resume text, prompt content, Gemini responses, or
+    any other request/response data -- just already-computed float timings
+    and fixed labels, so it stays cheap regardless of input size. A stage
+    that wasn't measured (e.g. Resume Extraction, which isn't performed in
+    this module, or whichever of JSON Parsing/JSON Repair didn't run on this
+    attempt) is rendered as "N/A" rather than estimated.
+    """
+    stage_order = [
+        ("Resume Extraction", "resume_extraction"),
+        ("Prompt Building", "prompt_building"),
+        ("Gemini API Call", "gemini_api"),
+        ("JSON Parsing", "json_parsing"),
+        ("JSON Repair", "json_repair"),
+        ("Validation", "validation"),
+        ("Post Processing", "post_processing"),
+    ]
+    label_width = max(len(label) for label, _ in stage_order + [("Total", "total")])
+
+    def _fmt(value: Any) -> str:
+        return f"{value:.2f} s" if isinstance(value, (int, float)) else "N/A"
+
+    lines = ["========== AI Latency Profile =========="]
+    for label, key in stage_order:
+        lines.append(f"{label.ljust(label_width)} : {_fmt(stage_seconds.get(key))}")
+    lines.append("-" * 41)
+    lines.append(f"{'Total'.ljust(label_width)} : {_fmt(stage_seconds.get('total'))}")
+    lines.append("=" * 41)
+    lines.append(
+        "Gemini API Call = total client-side call duration (send + server "
+        "processing + receive), not isolated model-inference time; the SDK "
+        "does not expose that breakdown for this non-streaming call."
+    )
+    lines.append(
+        "Per-stage timings reflect the final successful attempt; "
+        "Total includes retry/backoff overhead."
+    )
+    return "\n".join(lines)
+
+
 async def analyze_resume_text(text: str, target_role: Optional[str] = None, max_retries: int = 3) -> dict:
     """
     Sends extracted resume text to Gemini for a Production FAANG Audit and
@@ -805,19 +851,39 @@ async def analyze_resume_text(text: str, target_role: Optional[str] = None, max_
     re-parsing required -- main.py's /analyze endpoint can hand this straight
     back as the response body under response_model=AuditReportResponse.
     """
+    # overall_start marks the true beginning of the function -- placed before
+    # any validation or payload construction so Total reflects the full,
+    # actual latency a caller experiences, including retry/backoff overhead
+    # accumulated across the loop below.
+    overall_start = time.perf_counter()
+
     if not text or not text.strip():
         raise ValueError("Provided resume text is empty or could not be parsed.")
+
+    # prompt_start/prompt_end times only the construction of user_payload
+    # (string concatenation). Only the elapsed duration is ever kept -- the
+    # resume text, target role, or resulting payload are never logged here
+    # or by any other profiling code in this function.
+    prompt_start = time.perf_counter()
 
     user_payload = f"RESUME_TEXT:\n{text}"
     if target_role and target_role.strip():
         user_payload += f"\n\nTARGET_ROLE:\n{target_role.strip()}"
 
-    overall_start = time.perf_counter()
+    prompt_end = time.perf_counter()
 
     for attempt in range(max_retries):
         try:
             # Native async execution using client.aio with the configured model
             # & sanitized Pydantic structured output schema
+            #
+            # NOTE: gemini_start/gemini_end measures the TOTAL client-side
+            # duration of this call (request send + server processing +
+            # response receive). It is NOT isolated model-inference time --
+            # the SDK does not expose a network/first-token/generation
+            # breakdown for a non-streaming call like this one, and this
+            # instrumentation deliberately does not switch to streaming or
+            # estimate that split.
             gemini_start = time.perf_counter()
 
             logger.info(
@@ -866,6 +932,31 @@ async def analyze_resume_text(text: str, target_role: Optional[str] = None, max_
                 f"{gemini_end - gemini_start:.2f} seconds"
             )
 
+            # Read-only usage-metadata logging. Numeric token counts only --
+            # never prompt, response, or resume content. Defensive by design:
+            # usage_metadata (or any individual field on it) may be None or
+            # absent depending on the SDK/response, and a problem reading it
+            # must never be able to interrupt the actual analysis flow.
+            try:
+                usage = getattr(response, "usage_metadata", None)
+                if usage is not None:
+                    logger.info(
+                        f"[ATTEMPT {attempt + 1}] Gemini usage_metadata -- "
+                        f"prompt_token_count={getattr(usage, 'prompt_token_count', None)}, "
+                        f"candidates_token_count={getattr(usage, 'candidates_token_count', None)}, "
+                        f"cached_content_token_count={getattr(usage, 'cached_content_token_count', None)}, "
+                        f"thoughts_token_count={getattr(usage, 'thoughts_token_count', None)}, "
+                        f"total_token_count={getattr(usage, 'total_token_count', None)}"
+                    )
+                else:
+                    logger.info(
+                        f"[ATTEMPT {attempt + 1}] Gemini usage_metadata not available on this response."
+                    )
+            except Exception as usage_err:
+                logger.warning(
+                    f"[ATTEMPT {attempt + 1}] Failed to read Gemini usage metadata: {usage_err}"
+                )
+
             if not response.text:
                 # response.text is None whenever Gemini returns no text parts
                 # (content blocked by safety filters, empty candidates, or a
@@ -901,9 +992,13 @@ async def analyze_resume_text(text: str, target_role: Optional[str] = None, max_
             # metric-grounding (Problem 4), and scorecard mathematical
             # alignment (Problem 5) corrections directly on the dict -- no
             # re-serialization to a JSON string and back required.
+            postproc_start = time.perf_counter()
+
             parsed_content = _apply_keyword_grounding_fix(parsed_content, text)
             parsed_content = _apply_star_rewrite_metric_safeguard(parsed_content, text)
             parsed_content = _apply_scorecard_mathematical_alignment(parsed_content)
+
+            postproc_end = time.perf_counter()
 
             # Validate against the canonical response schema here, at the
             # source, so a malformed or incomplete generation is caught with a
@@ -934,6 +1029,25 @@ async def analyze_resume_text(text: str, target_role: Optional[str] = None, max_
                 f"[TOTAL AI SERVICE] Completed in "
                 f"{overall_end - overall_start:.2f} seconds"
             )
+
+            try:
+                latency_report = _format_latency_report({
+                    "resume_extraction": None,  # not performed in this module
+                    "prompt_building": prompt_end - prompt_start,
+                    "gemini_api": gemini_end - gemini_start,
+                    "json_parsing": json_end - json_start,
+                    "json_repair": None,  # success path never repairs
+                    "validation": validation_end - validation_start,
+                    "post_processing": postproc_end - postproc_start,
+                    "total": overall_end - overall_start,
+                })
+                logger.info("\n" + latency_report)
+            except Exception as report_err:
+                # Profiling must never be able to break the actual analysis
+                # flow -- any issue building/logging the report is swallowed
+                # here rather than propagated.
+                logger.warning(f"[AI LATENCY PROFILE] Failed to build report: {report_err}")
+
             return validated_report.model_dump(mode="json")
 
         except json.JSONDecodeError as jde:
@@ -947,16 +1061,25 @@ async def analyze_resume_text(text: str, target_role: Optional[str] = None, max_
                 logger.warning("[JSON REPAIR] Starting repair...")
 
                 repaired_text = _repair_truncated_json(response.text)
+                # Post-repair json.loads is deliberately kept inside the
+                # JSON Repair bucket (not a separate report category) per
+                # the agreed profiling plan.
+                parsed_content = json.loads(repaired_text)
 
                 repair_end = time.perf_counter()
 
                 logger.info(
                     f"[JSON REPAIR] Completed in {repair_end - repair_start:.4f} seconds"
                 )
-                parsed_content = json.loads(repaired_text)
+
+                postproc_start = time.perf_counter()
+
                 parsed_content = _apply_keyword_grounding_fix(parsed_content, text)
                 parsed_content = _apply_star_rewrite_metric_safeguard(parsed_content, text)
                 parsed_content = _apply_scorecard_mathematical_alignment(parsed_content)
+
+                postproc_end = time.perf_counter()
+
                 validation_start = time.perf_counter()
 
                 validated_report = AuditReportResponse.model_validate(parsed_content)
@@ -974,6 +1097,24 @@ async def analyze_resume_text(text: str, target_role: Optional[str] = None, max_
                     f"[TOTAL AI SERVICE] Completed in "
                     f"{overall_end - overall_start:.2f} seconds"
                 )
+
+                try:
+                    latency_report = _format_latency_report({
+                        "resume_extraction": None,  # not performed in this module
+                        "prompt_building": prompt_end - prompt_start,
+                        "gemini_api": gemini_end - gemini_start,
+                        "json_parsing": None,  # folded into JSON Repair on this path
+                        "json_repair": repair_end - repair_start,
+                        "validation": validation_end - validation_start,
+                        "post_processing": postproc_end - postproc_start,
+                        "total": overall_end - overall_start,
+                    })
+                    logger.info("\n" + latency_report)
+                except Exception as report_err:
+                    # Profiling must never be able to break the actual
+                    # analysis flow -- swallow, never propagate.
+                    logger.warning(f"[AI LATENCY PROFILE] Failed to build report: {report_err}")
+
                 return validated_report.model_dump(mode="json")
             except Exception as repair_err:
                 logger.warning(f"JSON repair also failed on attempt {attempt + 1}/{max_retries}: {repair_err}")
