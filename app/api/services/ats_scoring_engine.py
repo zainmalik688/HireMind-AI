@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Optional, Protocol
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 @dataclass
 class CategoryDetail:
     category: str
@@ -111,6 +111,19 @@ class ATSEvidence:
     achievement_total_lines: int
     metric_ratio: float
     verb_ratio: float
+
+
+def serialize_ats_evidence(evidence: ATSEvidence) -> dict[str, Any]:
+    """Pure, lossless serializer: ATSEvidence -> flat dict[str, Any].
+
+    No rounding, grouping, filtering, or other transformation of any
+    field -- every value is passed through exactly as stored on the
+    dataclass instance. Output is plain-data JSON-serializable (bool,
+    int, float, str, list[str], or None), matching every field's type
+    declared on ATSEvidence above. Pure function: no I/O, no side
+    effects, no dependency on anything outside its single argument.
+    """
+    return asdict(evidence)
 
 
 # ---------------------------------------------------------------------------
