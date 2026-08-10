@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 # ==========================================
@@ -159,10 +159,36 @@ class ScoreBreakdown(BaseModel):
     achievements: int = Field(..., ge=0, le=25, description="Points for quantified achievements and measurable impact, out of a 25-point maximum.")
     ats_compatibility: int = Field(..., ge=0, le=15, description="Points for raw ATS parseability (fonts, tables, columns, file structure), out of a 15-point maximum.")
 
+class ATSExplanationCategory(BaseModel):
+    status: Literal["strong", "acceptable", "weak"]
+    headline: str = Field(..., max_length=120)
+    details: list[Annotated[str, Field(max_length=300)]] = Field(..., max_length=4)
+
+class ATSExplanation(BaseModel):
+    overall_summary: str = Field(..., max_length=500)
+    categories: dict[str, ATSExplanationCategory]
+    key_strengths: list[Annotated[str, Field(max_length=250)]] = Field(..., max_length=5)
+    priority_improvements: list[Annotated[str, Field(max_length=300)]] = Field(..., max_length=5)
+
+    @field_validator("categories", mode="after")
+    @classmethod
+    def bound_categories(cls, v: dict[str, ATSExplanationCategory]) -> dict[str, ATSExplanationCategory]:
+        """Enforce a maximum of 7 categories and a maximum key length of 60 chars.
+        Pydantic v2 has no native max-items/max-length constraint for dict keys,
+        so this is enforced explicitly. Raises rather than truncating or
+        fabricating data, per the no-fallback-values requirement."""
+        if len(v) > 7:
+            raise ValueError(f"categories must contain at most 7 entries, got {len(v)}")
+        for key in v:
+            if len(key) > 60:
+                raise ValueError(f"category key must be at most 60 characters, got {len(key)}: {key!r}")
+        return v
+
 class ATSScoreItem(BaseModel):
     score: int = Field(ge=0, le=100)
     breakdown: ScoreBreakdown
     reason_not_higher: str
+    explanation: ATSExplanation | None = None
 
 class ScoreItem(BaseModel):
     score: int = Field(ge=0, le=100)
