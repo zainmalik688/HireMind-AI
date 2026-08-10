@@ -47,6 +47,72 @@ class CategoryDetail:
     evidence: dict[str, Any]
 
 
+@dataclass
+class ATSEvidence:
+    """Structured evidence from the deterministic ATS scoring engine.
+
+    All fields are provider-agnostic and privacy-safe.
+    No raw resume text, PII, or profession-specific assumptions.
+
+    Additive to the existing scoring engine: nothing here changes the
+    numeric behavior of score_*() or compute_ats_score(). Every field is
+    populated by the corresponding _assess_*() function alongside the
+    identical score that the legacy score_*() wrapper returns.
+    """
+    # Contact
+    email_present: bool
+    phone_present: bool
+    linkedin_present: bool
+    github_present: bool
+    contact_raw_points: float
+
+    # Sections
+    work_experience_present: bool
+    education_present: bool
+    skills_present: bool
+    core_sections_present_count: int
+    core_sections_ratio: float
+
+    # Parsing
+    is_scanned: bool
+    word_count: int
+    page_count: int
+    words_per_page: float
+    word_count_tier: str  # "full", "partial", "insufficient"
+    density_ok: bool
+
+    # Structure
+    block_count: int
+    block_ratio: float
+    bullet_count: int
+    total_content_lines: int
+    bullet_ratio: float
+
+    # Formatting
+    avg_line_length: float
+    long_line_count: int
+    long_line_ratio: float
+    length_ratio: float
+    long_line_score_ratio: float
+
+    # Keywords (provider-agnostic)
+    matched_keywords: list[str]
+    missing_keywords: list[str]
+    total_keywords: int
+    match_count: int
+    coverage_ratio: float
+    provider_name: str
+    provider_has_role_data: bool
+    target_role: Optional[str]
+
+    # Achievements
+    metric_hits: int
+    verb_hits: int
+    achievement_total_lines: int
+    metric_ratio: float
+    verb_ratio: float
+
+
 # ---------------------------------------------------------------------------
 # Single source of truth for every weight and threshold used below.
 # The seven internal categories sum to exactly 100 and roll up into the
@@ -176,60 +242,149 @@ def _starts_with_action_verb(line: str) -> bool:
 # ---------------------------------------------------------------------------
 # Individual scorers -- each is pure, defensive, and independently testable.
 # ---------------------------------------------------------------------------
+def _assess_contact(entities: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Score contact-info presence (email/phone/professional link) and capture evidence.
+
+    Identical arithmetic to score_contact -- evidence capture is additive
+    only, no branch or formula is changed.
+    """
+    info = (entities or {}).get("candidate_info") or {}
+    email_present = bool(info.get("email"))
+    phone_present = bool(info.get("phone"))
+    linkedin_present = bool(info.get("linkedin"))
+    github_present = bool(info.get("github"))
+
+    points = 0.0
+    if email_present:
+        points += 2
+    if phone_present:
+        points += 2
+    if linkedin_present or github_present:
+        points += 1
+
+    evidence = {
+        "email_present": email_present,
+        "phone_present": phone_present,
+        "linkedin_present": linkedin_present,
+        "github_present": github_present,
+        "contact_raw_points": points,
+    }
+    return _clamp(points, 0, WEIGHT_CONTACT), evidence
+
+
 def score_contact(entities: dict[str, Any]) -> int:
     """0-5. Presence of email, phone, and at least one professional link."""
-    info = (entities or {}).get("candidate_info") or {}
-    points = 0.0
-    if info.get("email"):
-        points += 2
-    if info.get("phone"):
-        points += 2
-    if info.get("linkedin") or info.get("github"):
-        points += 1
-    return _clamp(points, 0, WEIGHT_CONTACT)
+    return _assess_contact(entities)[0]
+
+
+def _assess_sections(entities: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Score core-section presence (work experience/education/skills) and capture evidence.
+
+    Identical arithmetic to score_sections -- evidence capture is additive
+    only, no branch or formula is changed.
+    """
+    entities = entities or {}
+    work_experience_present = bool(entities.get("work_experience"))
+    education_present = bool(entities.get("education"))
+    skills_present = bool(entities.get("skills") or entities.get("total_skills_count", 0) > 0)
+
+    present = 0
+    if work_experience_present:
+        present += 1
+    if education_present:
+        present += 1
+    if skills_present:
+        present += 1
+    ratio = present / len(CORE_SECTIONS_FOR_ATS)
+
+    evidence = {
+        "work_experience_present": work_experience_present,
+        "education_present": education_present,
+        "skills_present": skills_present,
+        "core_sections_present_count": present,
+        "core_sections_ratio": ratio,
+    }
+    return _clamp(WEIGHT_SECTIONS * ratio, 0, WEIGHT_SECTIONS), evidence
 
 
 def score_sections(entities: dict[str, Any]) -> int:
     """0-5. Fraction of core ATS-relevant sections (experience/education/skills) present."""
-    entities = entities or {}
-    present = 0
-    if entities.get("work_experience"):
-        present += 1
-    if entities.get("education"):
-        present += 1
-    if entities.get("skills") or entities.get("total_skills_count", 0) > 0:
-        present += 1
-    ratio = present / len(CORE_SECTIONS_FOR_ATS)
-    return _clamp(WEIGHT_SECTIONS * ratio, 0, WEIGHT_SECTIONS)
+    return _assess_sections(entities)[0]
 
 
-def score_parsing(extraction_result: dict[str, Any]) -> int:
-    """0-5. Signals that the document actually parsed into usable text."""
+def _assess_parsing(extraction_result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Score parse-quality signals (scanned/word count/page density) and capture evidence.
+
+    Identical arithmetic to score_parsing, including the original
+    short-circuit: if extraction_result is empty/falsy, scoring never
+    proceeds past that check, and evidence reflects that nothing was
+    measured rather than inventing values.
+    """
     result = extraction_result or {}
     if not result:
-        return 0
+        evidence = {
+            "is_scanned": False,
+            "word_count": 0,
+            "page_count": 0,
+            "words_per_page": 0.0,
+            "word_count_tier": "insufficient",
+            "density_ok": False,
+        }
+        return 0, evidence
 
+    is_scanned = result.get("is_scanned", False)
     points = 0.0
-    if not result.get("is_scanned", False):
+    if not is_scanned:
         points += 2
 
     word_count = result.get("word_count", 0) or 0
     if word_count >= PARSING_MIN_WORD_COUNT_FULL:
         points += 2
+        word_count_tier = "full"
     elif word_count >= PARSING_MIN_WORD_COUNT_PARTIAL:
         points += 1
+        word_count_tier = "partial"
+    else:
+        word_count_tier = "insufficient"
 
     page_count = result.get("page_count") or 0
-    if page_count > 0 and (word_count / page_count) >= PARSING_MIN_DENSITY_PER_PAGE:
+    words_per_page = (word_count / page_count) if page_count > 0 else 0.0
+    density_ok = page_count > 0 and words_per_page >= PARSING_MIN_DENSITY_PER_PAGE
+    if density_ok:
         points += 1
 
-    return _clamp(points, 0, WEIGHT_PARSING)
+    evidence = {
+        "is_scanned": bool(is_scanned),
+        "word_count": word_count,
+        "page_count": page_count,
+        "words_per_page": words_per_page,
+        "word_count_tier": word_count_tier,
+        "density_ok": density_ok,
+    }
+    return _clamp(points, 0, WEIGHT_PARSING), evidence
 
 
-def score_structure(text: str) -> int:
-    """0-20. Distinct content blocks + consistent bullet usage."""
+def score_parsing(extraction_result: dict[str, Any]) -> int:
+    """0-5. Signals that the document actually parsed into usable text."""
+    return _assess_parsing(extraction_result)[0]
+
+
+def _assess_structure(text: str) -> tuple[int, dict[str, Any]]:
+    """Score content-block count + bullet-usage ratio and capture evidence.
+
+    Identical arithmetic to score_structure, including the original
+    short-circuit: empty text returns 0 without ever splitting into
+    blocks/lines, and evidence reflects that nothing was measured.
+    """
     if not text:
-        return 0
+        evidence = {
+            "block_count": 0,
+            "block_ratio": 0.0,
+            "bullet_count": 0,
+            "total_content_lines": 0,
+            "bullet_ratio": 0.0,
+        }
+        return 0, evidence
 
     blocks = [b for b in re.split(r"\n\s*\n", text) if b.strip()]
     block_ratio = min(1.0, len(blocks) / STRUCTURE_TARGET_BLOCKS)
@@ -240,17 +395,48 @@ def score_structure(text: str) -> int:
         bulleted = sum(1 for line in lines if _BULLET_PREFIX_PATTERN.match(line))
         bullet_ratio = min(1.0, (bulleted / len(lines)) / STRUCTURE_TARGET_BULLET_RATIO)
     else:
+        bulleted = 0
         bullet_ratio = 0.0
     bullet_points = STRUCTURE_BULLET_WEIGHT * bullet_ratio
 
-    return _clamp(block_points + bullet_points, 0, WEIGHT_STRUCTURE)
+    evidence = {
+        "block_count": len(blocks),
+        "block_ratio": block_ratio,
+        "bullet_count": bulleted,
+        "total_content_lines": len(lines),
+        "bullet_ratio": bullet_ratio,
+    }
+    return _clamp(block_points + bullet_points, 0, WEIGHT_STRUCTURE), evidence
 
 
-def score_formatting(text: str) -> int:
-    """0-15. Line-length scanability proxies (avoids wall-of-text penalties)."""
+def score_structure(text: str) -> int:
+    """0-20. Distinct content blocks + consistent bullet usage."""
+    return _assess_structure(text)[0]
+
+
+def _assess_formatting(text: str) -> tuple[int, dict[str, Any]]:
+    """Score line-length scanability (avg length + wall-of-text penalty) and capture evidence.
+
+    Identical arithmetic to score_formatting, including the original
+    short-circuit: no content lines returns 0 without computing any
+    length statistics, and evidence reflects that nothing was measured.
+
+    `total_content_lines` here is computed from _content_lines(text) on
+    the same `text` argument _assess_structure() receives, so the two
+    values always agree; compute_ats_score_with_evidence() keeps only one
+    of the two identical values when building ATSEvidence.
+    """
     lines = _content_lines(text)
     if not lines:
-        return 0
+        evidence = {
+            "total_content_lines": 0,
+            "avg_line_length": 0.0,
+            "long_line_count": 0,
+            "long_line_ratio": 0.0,
+            "length_ratio": 0.0,
+            "long_line_score_ratio": 0.0,
+        }
+        return 0, evidence
 
     avg_len = sum(len(line) for line in lines) / len(lines)
     if FORMATTING_IDEAL_LINE_MIN <= avg_len <= FORMATTING_IDEAL_LINE_MAX:
@@ -266,25 +452,134 @@ def score_formatting(text: str) -> int:
     long_line_score_ratio = max(0.0, 1 - (long_ratio / FORMATTING_LONG_LINE_MAX_RATIO))
     long_line_points = FORMATTING_LONG_LINE_WEIGHT * long_line_score_ratio
 
-    return _clamp(length_points + long_line_points, 0, WEIGHT_FORMATTING)
+    evidence = {
+        "total_content_lines": len(lines),
+        "avg_line_length": avg_len,
+        "long_line_count": long_lines,
+        "long_line_ratio": long_ratio,
+        "length_ratio": length_ratio,
+        "long_line_score_ratio": long_line_score_ratio,
+    }
+    return _clamp(length_points + long_line_points, 0, WEIGHT_FORMATTING), evidence
+
+
+def score_formatting(text: str) -> int:
+    """0-15. Line-length scanability proxies (avoids wall-of-text penalties)."""
+    return _assess_formatting(text)[0]
+
+
+def _assess_keywords(
+    text: str, provider: KeywordProvider, target_role: Optional[str] = None
+) -> tuple[int, dict[str, Any]]:
+    """Score distinct-keyword coverage (capped) and capture matched/missing evidence.
+
+    Identical arithmetic to score_keywords, including both original
+    short-circuits: provider.get_keywords() is never called if text is
+    empty or provider is None (exactly like the original body), and
+    scoring also short-circuits if the provider returns an empty keyword
+    set. Evidence stays provider-agnostic: raw matched/missing keyword
+    strings only, no categorization.
+    """
+    provider_name = type(provider).__name__ if provider is not None else "none"
+
+    if not text or provider is None:
+        evidence = {
+            "matched_keywords": [],
+            "missing_keywords": [],
+            "total_keywords": 0,
+            "match_count": 0,
+            "coverage_ratio": 0.0,
+            "provider_name": provider_name,
+            "provider_has_role_data": False,
+            "target_role": target_role,
+        }
+        return 0, evidence
+
+    keywords = provider.get_keywords(target_role)
+    if not keywords:
+        evidence = {
+            "matched_keywords": [],
+            "missing_keywords": [],
+            "total_keywords": 0,
+            "match_count": 0,
+            "coverage_ratio": 0.0,
+            "provider_name": provider_name,
+            "provider_has_role_data": False,
+            "target_role": target_role,
+        }
+        return 0, evidence
+
+    text_lower = text.lower()
+    matched_keywords: list[str] = []
+    missing_keywords: list[str] = []
+    for kw in keywords:
+        if re.search(r"\b" + re.escape(kw) + r"\b", text_lower):
+            matched_keywords.append(kw)
+        else:
+            missing_keywords.append(kw)
+    matched = len(matched_keywords)
+
+    ratio = min(1.0, matched / KEYWORD_MATCH_CAP)
+    total_keywords = len(keywords)
+    coverage_ratio = (matched / total_keywords) if total_keywords > 0 else 0.0
+
+    evidence = {
+        "matched_keywords": matched_keywords,
+        "missing_keywords": missing_keywords,
+        "total_keywords": total_keywords,
+        "match_count": matched,
+        "coverage_ratio": coverage_ratio,
+        "provider_name": provider_name,
+        "provider_has_role_data": False,
+        "target_role": target_role,
+    }
+    return _clamp(WEIGHT_KEYWORDS * ratio, 0, WEIGHT_KEYWORDS), evidence
 
 
 def score_keywords(text: str, provider: KeywordProvider, target_role: Optional[str] = None) -> int:
     """0-25. Count of distinct provider keywords found in the text, capped."""
-    if not text or provider is None:
-        return 0
-    keywords = provider.get_keywords(target_role)
-    if not keywords:
-        return 0
+    return _assess_keywords(text, provider, target_role)[0]
 
-    text_lower = text.lower()
-    matched = 0
-    for kw in keywords:
-        if re.search(r"\b" + re.escape(kw) + r"\b", text_lower):
-            matched += 1
 
-    ratio = min(1.0, matched / KEYWORD_MATCH_CAP)
-    return _clamp(WEIGHT_KEYWORDS * ratio, 0, WEIGHT_KEYWORDS)
+def _assess_achievements(text: str) -> tuple[int, dict[str, Any]]:
+    """Score quantified-metric + action-verb line density and capture evidence.
+
+    Deterministic proxy for "quantified achievements" -- it detects the
+    presence of measurable signals (numbers, percentages, currency,
+    multipliers) and strong action-verb openers, not the subjective
+    impressiveness of any single achievement.
+
+    Identical arithmetic to score_achievements, including the original
+    short-circuit: no content lines returns 0 without computing any hit
+    counts, and evidence reflects that nothing was measured.
+    """
+    lines = _content_lines(text)
+    if not lines:
+        evidence = {
+            "metric_hits": 0,
+            "verb_hits": 0,
+            "achievement_total_lines": 0,
+            "metric_ratio": 0.0,
+            "verb_ratio": 0.0,
+        }
+        return 0, evidence
+
+    metric_hits = sum(1 for line in lines if _METRIC_PATTERN.search(line))
+    verb_hits = sum(1 for line in lines if _starts_with_action_verb(line))
+
+    metric_ratio = min(1.0, (metric_hits / len(lines)) / ACHIEVEMENT_TARGET_METRIC_RATIO)
+    verb_ratio = min(1.0, (verb_hits / len(lines)) / ACHIEVEMENT_TARGET_VERB_RATIO)
+
+    points = (ACHIEVEMENT_METRIC_WEIGHT * metric_ratio) + (ACHIEVEMENT_VERB_WEIGHT * verb_ratio)
+
+    evidence = {
+        "metric_hits": metric_hits,
+        "verb_hits": verb_hits,
+        "achievement_total_lines": len(lines),
+        "metric_ratio": metric_ratio,
+        "verb_ratio": verb_ratio,
+    }
+    return _clamp(points, 0, WEIGHT_ACHIEVEMENTS), evidence
 
 
 def score_achievements(text: str) -> int:
@@ -295,18 +590,7 @@ def score_achievements(text: str) -> int:
     multipliers) and strong action-verb openers, not the subjective
     impressiveness of any single achievement.
     """
-    lines = _content_lines(text)
-    if not lines:
-        return 0
-
-    metric_hits = sum(1 for line in lines if _METRIC_PATTERN.search(line))
-    verb_hits = sum(1 for line in lines if _starts_with_action_verb(line))
-
-    metric_ratio = min(1.0, (metric_hits / len(lines)) / ACHIEVEMENT_TARGET_METRIC_RATIO)
-    verb_ratio = min(1.0, (verb_hits / len(lines)) / ACHIEVEMENT_TARGET_VERB_RATIO)
-
-    points = (ACHIEVEMENT_METRIC_WEIGHT * metric_ratio) + (ACHIEVEMENT_VERB_WEIGHT * verb_ratio)
-    return _clamp(points, 0, WEIGHT_ACHIEVEMENTS)
+    return _assess_achievements(text)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -324,31 +608,43 @@ def _build_reason(breakdown: dict[str, int], schema_maxes: dict[str, int]) -> st
     )
 
 
-def compute_ats_score(
+def compute_ats_score_with_evidence(
     *,
     text: str,
     entities: dict[str, Any],
     extraction_result: dict[str, Any],
     keyword_provider: KeywordProvider,
     target_role: Optional[str] = None,
-) -> dict[str, Any]:
-    """Compute the full ATS Compatibility Score. Always returns a 0-100 score.
+) -> tuple[dict[str, Any], ATSEvidence]:
+    """Compute the ATS score exactly as compute_ats_score() does, plus structured evidence.
 
-    Returns: {"score": int, "breakdown": {...5 existing ScoreBreakdown fields...}, "reason": str}
+    Additive orchestrator: the legacy score dict returned here has the same
+    shape and, for identical inputs, the same values compute_ats_score()
+    has always returned -- it is built from the same _assess_*() score
+    values in the same order compute_ats_score() has always used. The only
+    new thing is the second return value, an ATSEvidence instance built
+    from the evidence returned alongside those scores.
+
+    Returns: (legacy_result, evidence) where legacy_result is
+    {"score": int, "breakdown": {...5 existing ScoreBreakdown fields...}, "reason": str}
     """
     text = text or ""
     entities = entities or {}
     extraction_result = extraction_result or {}
 
-    contact = score_contact(entities)
-    sections = score_sections(entities)
-    parsing = score_parsing(extraction_result)
+    contact, contact_evidence = _assess_contact(entities)
+    sections, sections_evidence = _assess_sections(entities)
+    parsing, parsing_evidence = _assess_parsing(extraction_result)
+    formatting, formatting_evidence = _assess_formatting(text)
+    keywords, keywords_evidence = _assess_keywords(text, keyword_provider, target_role)
+    structure, structure_evidence = _assess_structure(text)
+    achievements, achievements_evidence = _assess_achievements(text)
 
     breakdown = {
-        "formatting": score_formatting(text),
-        "keywords": score_keywords(text, keyword_provider, target_role),
-        "structure": score_structure(text),
-        "achievements": score_achievements(text),
+        "formatting": formatting,
+        "keywords": keywords,
+        "structure": structure,
+        "achievements": achievements,
         "ats_compatibility": _clamp(contact + sections + parsing, 0, WEIGHT_CONTACT + WEIGHT_SECTIONS + WEIGHT_PARSING),
     }
 
@@ -362,8 +658,53 @@ def compute_ats_score(
 
     total = _clamp(sum(breakdown.values()), 0, 100)
 
-    return {
+    legacy_result = {
         "score": total,
         "breakdown": breakdown,
         "reason": _build_reason(breakdown, schema_maxes),
     }
+
+    # formatting_evidence carries its own "total_content_lines" key with a
+    # value identical to structure_evidence's (both computed from
+    # _content_lines(text) on the same text) -- drop the duplicate before
+    # unpacking into ATSEvidence to avoid a duplicate-kwarg TypeError.
+    formatting_evidence_deduped = {
+        k: v for k, v in formatting_evidence.items() if k != "total_content_lines"
+    }
+
+    evidence = ATSEvidence(
+        **contact_evidence,
+        **sections_evidence,
+        **parsing_evidence,
+        **structure_evidence,
+        **formatting_evidence_deduped,
+        **keywords_evidence,
+        **achievements_evidence,
+    )
+
+    return legacy_result, evidence
+
+
+def compute_ats_score(
+    *,
+    text: str,
+    entities: dict[str, Any],
+    extraction_result: dict[str, Any],
+    keyword_provider: KeywordProvider,
+    target_role: Optional[str] = None,
+) -> dict[str, Any]:
+    """Compute the full ATS Compatibility Score. Always returns a 0-100 score.
+
+    Backward-compatible wrapper. Returns only the legacy score dict --
+    identical shape and values to every previous version of this function.
+
+    Returns: {"score": int, "breakdown": {...5 existing ScoreBreakdown fields...}, "reason": str}
+    """
+    score_dict, _ = compute_ats_score_with_evidence(
+        text=text,
+        entities=entities,
+        extraction_result=extraction_result,
+        keyword_provider=keyword_provider,
+        target_role=target_role,
+    )
+    return score_dict
