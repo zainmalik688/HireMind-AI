@@ -34,12 +34,12 @@ from app.api.services.validation_service import DocumentValidationService, MAX_F
 from app.api.services.parsing_service import ResumeParsingEngine
 from app.api.services.extractor import EntityExtractor
 from app.api.services.classifier_service import ResumeClassifierService
-from app.api.services.ats_scoring_engine import compute_ats_score, StaticKeywordProvider
+from app.api.services.ats_scoring_engine import compute_ats_score_with_evidence, serialize_ats_evidence, StaticKeywordProvider
 from app.api.utils.text_cleaner import TextCleaner
 
 # V1/V3 Services
 from app.api.services.pdf_service import extract_text_from_file
-from app.api.services.ai_service import analyze_resume_text
+from app.api.services.ai_service import analyze_resume_text, explain_ats_result
 
 app = FastAPI(
     title="HireMind AI - Resume Intelligence Engine",
@@ -360,26 +360,32 @@ async def analyze_resume(
                 "AI Service returned an unexpected payload shape (expected a JSON object)."
             )
         _t0 = time.perf_counter()
-        try:
-            ats_result = compute_ats_score(
-                text=extracted_text,
-                entities=extracted_entities,
-                extraction_result=extracted_result if isinstance(extracted_result, dict) else {},
-                keyword_provider=StaticKeywordProvider(EntityExtractor.SKILLS_DB),
-                target_role=target_role,
-            )
-        except Exception:
-            ats_result = {
-                "score": 0,
-                "breakdown": {"formatting": 0, "keywords": 0, "structure": 0, "achievements": 0, "ats_compatibility": 0},
-                "reason": "Deterministic ATS scoring could not be completed for this document.",
-            }
+        ats_result, ats_evidence = compute_ats_score_with_evidence(
+            text=extracted_text,
+            entities=extracted_entities,
+            extraction_result=extracted_result if isinstance(extracted_result, dict) else {},
+            keyword_provider=StaticKeywordProvider(EntityExtractor.SKILLS_DB),
+            target_role=target_role,
+        )
         _perf("ATS Engine", _t0)
+
+        _t0 = time.perf_counter()
+        try:
+            ats_explanation = await explain_ats_result(
+                score=ats_result["score"],
+                breakdown=ats_result["breakdown"],
+                evidence=serialize_ats_evidence(ats_evidence),
+            )
+        except Exception as explain_err:
+            logger.info(f"[ATS Explanation] failed: {type(explain_err).__name__}")
+            ats_explanation = None
+        _perf("ATS Explanation", _t0)
 
         ats_score_payload = {
             "score": ats_result["score"],
             "breakdown": ats_result["breakdown"],
             "reason_not_higher": ats_result["reason"],
+            "explanation": ats_explanation,
         }
         if isinstance(analysis_dict.get("explainable_scorecard"), dict):
             analysis_dict["explainable_scorecard"]["ats_score"] = ats_score_payload
