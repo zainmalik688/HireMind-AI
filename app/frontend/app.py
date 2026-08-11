@@ -903,6 +903,28 @@ if st.session_state.get("active_audit"):
             f" {rec_obj.get('reason', safe_dict(dim_scores.get('structural_quality')).get('reasoning', 'N/A'))}"
         )
 
+        st.markdown("### ATS Score Explanation")
+        ats_explanation = safe_dict(ats_obj.get("explanation"))
+        if ats_explanation:
+            st.write(safe_str(ats_explanation.get("overall_summary")))
+            for cat_name, cat in safe_dict(ats_explanation.get("categories")).items():
+                cat = safe_dict(cat)
+                st.markdown(f"**{safe_str(cat_name, '').replace('_', ' ').title()}** (`{safe_str(cat.get('status'))}`): {safe_str(cat.get('headline'))}")
+                for detail in safe_list(cat.get("details")):
+                    st.write(f"- {safe_str(detail, '')}")
+            strengths = safe_list(ats_explanation.get("key_strengths"))
+            if strengths:
+                st.markdown("**Key Strengths:**")
+                for s in strengths:
+                    st.write(f"- {safe_str(s, '')}")
+            improvements = safe_list(ats_explanation.get("priority_improvements"))
+            if improvements:
+                st.markdown("**Priority Improvements:**")
+                for imp in improvements:
+                    st.write(f"- {safe_str(imp, '')}")
+        else:
+            st.info("Detailed ATS explanation is not available for this analysis.")
+
         st.markdown("### Structure & Scan Speed Review")
         struct = safe_dict(data.get("resume_structure_review"))
         if struct:
