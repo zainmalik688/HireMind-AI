@@ -10,6 +10,8 @@ logic at the bottom stays short and readable:
     4. Schema utilities (Gemini structured-output schema sanitization)
     5. Post-processing safeguards (deterministic fixes for Problems 3, 4 & 5)
     6. Core service execution (analyze_resume_text)
+    7. ATS explanation (explain_ats_result -- Module 5 Part 2: explains an
+       already-computed deterministic ATS score, never recalculates it)
 """
 
 import os
@@ -25,8 +27,8 @@ from pydantic import ValidationError
 from google import genai
 from google.genai import types, errors
 
-# Import response schema for Gemini Structured Output
-from app.api.schemas import AuditReportResponse
+# Import response schemas for Gemini Structured Output
+from app.api.schemas import AuditReportResponse, ATSExplanation
 
 load_dotenv()
 
@@ -1162,3 +1164,128 @@ async def analyze_resume_text(text: str, target_role: Optional[str] = None, max_
     # should be unreachable, but it guarantees the function never falls through
     # silently if that invariant is ever broken by a future edit.
     raise RuntimeError("AI Service exhausted all retry attempts without a successful response.")
+
+
+# =============================================================================
+# 7. ATS EXPLANATION (Module 5, Part 2, Step 2 Sub-step 3)
+#
+# Gemini here is a pure explainer, never a scorer:
+#   - The deterministic ats_scoring_engine.py has ALREADY computed the ATS
+#     score, breakdown, and evidence before this function is ever called.
+#   - This function sends that finished result to Gemini and asks it to
+#     narrate WHY the score looks the way it does, grounded only in the
+#     serialized evidence -- no raw resume text is sent, and Gemini has no
+#     way to change the score (response_schema has no score field at all).
+#   - Self-contained retry loop (Option A): deliberately does not share or
+#     modify analyze_resume_text()'s retry logic above, so this isolated
+#     addition cannot affect already-working audit behavior.
+# =============================================================================
+
+# Sanitized once at import time, same pattern as _SANITIZED_RESPONSE_SCHEMA.
+_SANITIZED_ATS_EXPLANATION_SCHEMA = sanitize_schema_for_gemini(ATSExplanation.model_json_schema())
+
+_ATS_EXPLANATION_SYSTEM_PROMPT = """You are an ATS score explainer.
+
+A deterministic Python engine has ALREADY computed the candidate's ATS score, \
+category breakdown, and supporting evidence. These numbers are FINAL and \
+AUTHORITATIVE -- you cannot see the resume, and you must not recalculate, \
+adjust, override, or second-guess the score or breakdown in any way.
+
+Your only job is to explain, in plain language, why the score looks the way \
+it does, using ONLY the evidence fields supplied in the input. Do not invent \
+evidence, assumptions, or facts that are not present in the input.
+
+For each of the five breakdown categories -- formatting, keywords, structure, \
+achievements, ats_compatibility -- classify it as "strong", "acceptable", or \
+"weak" consistent with its points-out-of-max ratio, and justify that \
+classification by citing the matching evidence fields (e.g. keyword coverage \
+ratio for "keywords", bullet/block ratios for "structure"). Then give an \
+overall summary, the candidate's key strengths, and the highest-priority \
+improvements, all grounded in the same evidence."""
+
+
+async def explain_ats_result(
+    score: int,
+    breakdown: dict[str, int],
+    evidence: dict[str, Any],
+    max_retries: int = 3,
+) -> ATSExplanation:
+    """
+    Explains an already-computed, deterministic ATS result.
+
+    `score` and `breakdown` come straight from
+    ats_scoring_engine.compute_ats_score_with_evidence() (or compute_ats_score()),
+    and `evidence` is serialize_ats_evidence(...)'s output -- a flat,
+    privacy-safe dict with no raw resume text. Gemini explains this result;
+    it never recalculates it, and raw resume text is never sent.
+
+    Raises RuntimeError if every retry attempt fails. Never fabricates a
+    fallback ATSExplanation.
+    """
+    user_payload = json.dumps({"score": score, "breakdown": breakdown, "evidence": evidence})
+
+    for attempt in range(max_retries):
+        try:
+            response = await client.aio.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=f"DETERMINISTIC_ATS_RESULT:\n{user_payload}",
+                config=types.GenerateContentConfig(
+                    system_instruction=_ATS_EXPLANATION_SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    response_schema=_SANITIZED_ATS_EXPLANATION_SCHEMA,
+                    temperature=0.1,
+                    max_output_tokens=2048,
+                    http_options=types.HttpOptions(timeout=_GEMINI_REQUEST_TIMEOUT_MS),
+                ),
+            )
+
+            if not response.text:
+                raise ValueError(
+                    f"Gemini returned no text content on attempt {attempt + 1} "
+                    f"(response may have been blocked or empty)."
+                )
+
+            parsed_content = json.loads(response.text)
+            return ATSExplanation.model_validate(parsed_content)
+
+        except json.JSONDecodeError as jde:
+            logger.warning(f"[ATS EXPLANATION] JSON decode failed on attempt {attempt + 1}/{max_retries}: {jde}")
+            try:
+                parsed_content = json.loads(_repair_truncated_json(response.text))
+                return ATSExplanation.model_validate(parsed_content)
+            except Exception as repair_err:
+                logger.warning(f"[ATS EXPLANATION] JSON repair also failed: {repair_err}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+                continue
+            raise RuntimeError(f"ATS explanation produced invalid JSON: {jde}") from jde
+
+        except ValidationError as ve:
+            logger.warning(f"[ATS EXPLANATION] Schema validation failed on attempt {attempt + 1}/{max_retries}: {ve}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+                continue
+            raise RuntimeError(f"ATS explanation failed schema validation: {ve}") from ve
+
+        except errors.APIError as api_err:
+            logger.warning(
+                f"[ATS EXPLANATION] Gemini API error on attempt {attempt + 1}/{max_retries}: "
+                f"code={api_err.code} status={api_err.status} message={api_err.message}"
+            )
+            if api_err.code in _RETRYABLE_API_STATUS_CODES and attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            raise RuntimeError(
+                f"ATS explanation Gemini API error ({api_err.code} {api_err.status}): {api_err.message}"
+            ) from api_err
+
+        except Exception as e:
+            logger.warning(f"[ATS EXPLANATION] Unexpected error on attempt {attempt + 1}/{max_retries}: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            raise RuntimeError(f"ATS explanation processing error: {e}") from e
+
+    # Defensive fallback; unreachable in practice since every branch above
+    # either returns or raises, mirroring analyze_resume_text()'s guarantee.
+    raise RuntimeError("ATS explanation exhausted all retry attempts without a successful response.")
