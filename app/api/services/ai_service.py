@@ -1195,6 +1195,20 @@ Your only job is to explain, in plain language, why the score looks the way \
 it does, using ONLY the evidence fields supplied in the input. Do not invent \
 evidence, assumptions, or facts that are not present in the input.
 
+The evidence includes a `provider_has_role_data` flag. If it is true, treat \
+`matched_keywords`, `missing_keywords`, `total_keywords`, `coverage_ratio`, \
+and `match_count` as verified, role-specific evidence for the target role, \
+and use them freely for role-specific explanations and recommendations. If \
+it is false, those keyword metrics come from a generic, role-agnostic ATS \
+keyword set, not from verified target-role requirements: you may still cite \
+`total_keywords`, `match_count`, and `coverage_ratio`, but only as generic \
+ATS measurements (e.g. "the resume matches 18 of 64 terms in the current \
+general ATS keyword set"). In that case, never call them role-specific or \
+job-relevant requirements, never phrase them as "your [Role] keyword \
+coverage", never turn them into a target-role skills gap, and never \
+recommend adding, learning, or improving a specific skill or technology on \
+the basis of those generic metrics alone.
+
 For each of the five breakdown categories -- formatting, keywords, structure, \
 achievements, ats_compatibility -- classify it as "strong", "acceptable", or \
 "weak" consistent with its points-out-of-max ratio, and justify that \
@@ -1222,6 +1236,8 @@ async def explain_ats_result(
     Raises RuntimeError if every retry attempt fails. Never fabricates a
     fallback ATSExplanation.
     """
+    if not evidence.get("provider_has_role_data"):
+        evidence = {**evidence, "missing_keywords": []}
     user_payload = json.dumps({"score": score, "breakdown": breakdown, "evidence": evidence})
 
     for attempt in range(max_retries):
