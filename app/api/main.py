@@ -47,14 +47,15 @@ app = FastAPI(
 )
 
 # Enable CORS for Streamlit / Frontend integration
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:8501").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
-
 @app.get("/")
 def root():
     return {"status": "online", "message": "HireMind AI API Engine is running"}
