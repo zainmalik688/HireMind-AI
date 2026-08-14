@@ -159,6 +159,28 @@ class ScoreBreakdown(BaseModel):
     achievements: int = Field(..., ge=0, le=25, description="Points for quantified achievements and measurable impact, out of a 25-point maximum.")
     ats_compatibility: int = Field(..., ge=0, le=15, description="Points for raw ATS parseability (fonts, tables, columns, file structure), out of a 15-point maximum.")
 
+ATSParsingIssueType = Literal[
+    "TABLE",
+    "HEADER_FOOTER_TEXT",
+    "TEXT_BOX",
+    "MULTI_COLUMN",
+    "NONSTANDARD_BULLETS",
+]
+
+class ATSParsingIssue(BaseModel):
+    """
+    Deterministic, structural evidence produced by the document parser
+    (e.g. ats_parsing_checker.py in a later step). This is a facts-only
+    record of what was detected in the document -- it intentionally
+    contains no AI-authored interpretation of ATS impact; that belongs
+    to a later Gemini explanation step, not this model.
+    """
+    issue_type: ATSParsingIssueType = Field(..., description="The category of structural parsing issue detected.")
+    severity: Literal["low", "medium", "high"] = Field(..., description="Deterministic severity band assigned by the detector.")
+    confidence: Literal["low", "medium", "high"] = Field(..., description="Detector's confidence that this issue is genuinely present.")
+    affected_pages: list[int] | None = Field(None, description="1-indexed page numbers where the issue was detected, if page information is available.")
+    description: str = Field(..., max_length=300, description="Short, human-readable description of the structural finding.")
+
 class ATSExplanationCategory(BaseModel):
     status: Literal["strong", "acceptable", "weak"]
     headline: str = Field(..., max_length=120)
@@ -189,6 +211,7 @@ class ATSScoreItem(BaseModel):
     breakdown: ScoreBreakdown
     reason_not_higher: str
     explanation: ATSExplanation | None = None
+    parsing_issues: list[ATSParsingIssue] = Field(default_factory=list, description="Deterministic structural parsing issues detected by the parser. Populated by the parsing pipeline, not by AI-generated content.")
 
 class ScoreItem(BaseModel):
     score: int = Field(ge=0, le=100)
