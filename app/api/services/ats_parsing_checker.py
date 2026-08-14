@@ -11,6 +11,25 @@ BULLET_PATTERN = re.compile(r'[\uf0b7\uf06f\ue000-\uf8ff]')
 EMAIL_PATTERN = re.compile(r'[\w.+-]+@[\w-]+\.\w+')
 PHONE_CANDIDATE_PATTERN = re.compile(r'\+?[\d\s\-()]{8,}')
 
+# Wingdings-style bullet glyphs and WinAnsi middle dot (U+00B7) share the
+# same underlying byte value, so PDF extraction commonly normalizes a
+# dingbat bullet to "·" instead of preserving a private-use codepoint.
+# Only the line-leading position is treated as a bullet marker; "·" used
+# inline (e.g. "City · email · phone") is ordinary punctuation and is
+# never matched by this pattern.
+MIDDOT_LINE_START_PATTERN = re.compile(r'^[ \t]*·', re.MULTILINE)
+MIN_MIDDOT_BULLET_LINES = 2
+
+# Approved, conservative descriptions (Step 2 - Change 3). These state the
+# structural fact the detector can actually prove, not universal ATS behavior.
+DESCRIPTIONS = {
+    "TABLE": "Table detected — table-based layouts may reduce ATS parsing reliability.",
+    "HEADER_FOOTER_TEXT": "Contact information detected in header/footer — this placement may not be reliably parsed by ATS.",
+    "TEXT_BOX": "Text box detected — content inside text boxes may not be reliably parsed by ATS.",
+    "MULTI_COLUMN": "Layout suggests multiple columns — this may affect ATS reading order.",
+    "NONSTANDARD_BULLETS": "Icon or symbol bullets detected — these may render as garbled characters in some ATS.",
+}
+
 
 def _has_contact_info(text: str) -> bool:
     if EMAIL_PATTERN.search(text):
@@ -26,8 +45,8 @@ def check_docx_parsing_issues(doc) -> list[ATSParsingIssue]:
 
     if doc.tables:
         issues.append(ATSParsingIssue(
-            issue_type="TABLE", severity="high",
-            description=f"{len(doc.tables)} table(s) — many ATS can't read table content"
+            issue_type="TABLE", severity="high", confidence="high",
+            description=DESCRIPTIONS["TABLE"]
         ))
 
     hf_text = "\n".join(
@@ -36,14 +55,14 @@ def check_docx_parsing_issues(doc) -> list[ATSParsingIssue]:
     )
     if _has_contact_info(hf_text):
         issues.append(ATSParsingIssue(
-            issue_type="HEADER_FOOTER_TEXT", severity="high",
-            description="Contact info in header/footer — most ATS skip these regions"
+            issue_type="HEADER_FOOTER_TEXT", severity="high", confidence="high",
+            description=DESCRIPTIONS["HEADER_FOOTER_TEXT"]
         ))
 
     if '<w:txbxContent' in doc.element.xml:
         issues.append(ATSParsingIssue(
-            issue_type="TEXT_BOX", severity="high",
-            description="Text box(es) detected — content often unreadable by ATS"
+            issue_type="TEXT_BOX", severity="high", confidence="high",
+            description=DESCRIPTIONS["TEXT_BOX"]
         ))
 
     return issues
@@ -76,41 +95,52 @@ def _count_real_columns(blocks: list, page_height: float) -> int:
     return real_columns
 
 
-def check_pdf_page_issues(fitz_page) -> list[ATSParsingIssue]:
-    """Checks a single page. Caller aggregates across all pages."""
+def check_pdf_page_issues(fitz_page, page_number: int | None = None) -> list[ATSParsingIssue]:
+    """Checks a single page. Caller aggregates across all pages.
+
+    page_number is optional and 1-indexed. When supplied, it is attached to
+    each generated issue's affected_pages. Existing callers that invoke this
+    with just a page (no page_number) continue to work unchanged, and
+    affected_pages is left as None in that case.
+    """
     issues = []
     blocks = [b for b in fitz_page.get_text("blocks") if b[4].strip()]
+    affected_pages = [page_number] if page_number is not None else None
 
     if _count_real_columns(blocks, fitz_page.rect.height) >= 2:
         issues.append(ATSParsingIssue(
-            issue_type="MULTI_COLUMN", severity="medium",
-            description="Layout suggests multiple columns — can scramble ATS reading order"
+            issue_type="MULTI_COLUMN", severity="medium", confidence="medium",
+            affected_pages=affected_pages,
+            description=DESCRIPTIONS["MULTI_COLUMN"]
         ))
 
-    if BULLET_PATTERN.search(fitz_page.get_text()):
+    page_text = fitz_page.get_text()
+    has_raw_pua_bullet = bool(BULLET_PATTERN.search(page_text))
+    has_normalized_middot_bullets = len(MIDDOT_LINE_START_PATTERN.findall(page_text)) >= MIN_MIDDOT_BULLET_LINES
+    if has_raw_pua_bullet or has_normalized_middot_bullets:
         issues.append(ATSParsingIssue(
-            issue_type="NONSTANDARD_BULLETS", severity="low",
-            description="Icon/symbol bullets detected — may render as garbled chars in ATS"
+            issue_type="NONSTANDARD_BULLETS", severity="low", confidence="medium",
+            affected_pages=affected_pages,
+            description=DESCRIPTIONS["NONSTANDARD_BULLETS"]
         ))
 
     return issues
 
 
 def check_pdf_parsing_issues(fitz_doc) -> list[ATSParsingIssue]:
-    """Loops every page, aggregates issue types, dedupes, notes page count."""
+    """Loops every page, aggregates issue types, dedupes, and collects the
+    accurate 1-indexed page numbers each issue was found on."""
     seen = {}
-    total_pages = fitz_doc.page_count
-    for page in fitz_doc:
-        for issue in check_pdf_page_issues(page):
+    for page_number, page in enumerate(fitz_doc, start=1):
+        for issue in check_pdf_page_issues(page, page_number=page_number):
             if issue.issue_type not in seen:
-                seen[issue.issue_type] = {"issue": issue, "pages": 1}
+                seen[issue.issue_type] = issue
             else:
-                seen[issue.issue_type]["pages"] += 1
+                seen[issue.issue_type].affected_pages.append(page_number)
 
     results = []
-    for issue_type, data in seen.items():
-        issue = data["issue"]
-        if data["pages"] > 1:
-            issue.description += f" (found on {data['pages']}/{total_pages} pages)"
+    for issue in seen.values():
+        if issue.affected_pages:
+            issue.affected_pages = sorted(set(issue.affected_pages))
         results.append(issue)
     return results
