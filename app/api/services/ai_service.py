@@ -1215,7 +1215,38 @@ achievements, ats_compatibility -- classify it as "strong", "acceptable", or \
 classification by citing the matching evidence fields (e.g. keyword coverage \
 ratio for "keywords", bullet/block ratios for "structure"). Then give an \
 overall summary, the candidate's key strengths, and the highest-priority \
-improvements, all grounded in the same evidence."""
+improvements, all grounded in the same evidence.
+
+The evidence also includes a `parsing_issues` list. This list is deterministic \
+evidence from the document parser and is the ONLY authoritative source for ATS \
+parsing findings -- you cannot see the resume's layout, and parsing_issues is \
+your sole window into it.
+
+You MAY:
+- explain the parsing issues supplied in `parsing_issues`
+- summarize their likely ATS significance
+- mention their supplied `affected_pages`
+- give conservative improvement advice grounded in the supplied issues
+
+You MUST NOT:
+- invent a parsing issue that is not present in `parsing_issues`
+- claim a table exists unless an issue with issue_type "TABLE" is supplied
+- claim multiple columns exist unless "MULTI_COLUMN" is supplied
+- claim a text box exists unless "TEXT_BOX" is supplied
+- claim header/footer contact placement unless "HEADER_FOOTER_TEXT" is supplied
+- claim nonstandard/icon bullets exist unless "NONSTANDARD_BULLETS" is supplied
+- invent, alter, or guess at page numbers beyond what `affected_pages` supplies
+- change or restate an issue's `severity` or `confidence` as anything other \
+than what is supplied
+- state or imply any other structural/layout fact not present in `parsing_issues`
+
+If `parsing_issues` is empty, you MUST NOT invent or imply that any ATS \
+parsing/layout problem was detected. Do not infer that the document layout is \
+clean or problem-free; simply state that no deterministic parsing issues were \
+supplied by the parsing evidence. Every parsing-related statement you make must be \
+traceable to a specific entry in `parsing_issues`. Never make universal claims \
+such as "all ATS systems will reject this resume"; use conservative language \
+such as "this layout may affect ATS reading order" instead."""
 
 
 async def explain_ats_result(

@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Optional, Protocol
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 @dataclass
 class CategoryDetail:
     category: str
@@ -111,6 +111,14 @@ class ATSEvidence:
     achievement_total_lines: int
     metric_ratio: float
     verb_ratio: float
+
+    # Parsing issues (deterministic structural evidence, e.g. from
+    # ats_parsing_checker.py). Stored as plain dicts, not ATSParsingIssue
+    # instances, so ATSEvidence stays a flat dataclass that asdict() /
+    # json.dumps() can serialize without a custom encoder. Defaulted so
+    # existing callers that don't supply parsing issues keep constructing
+    # ATSEvidence exactly as before.
+    parsing_issues: list[dict[str, Any]] = field(default_factory=list)
 
 
 def serialize_ats_evidence(evidence: ATSEvidence) -> dict[str, Any]:
@@ -685,6 +693,17 @@ def compute_ats_score_with_evidence(
         k: v for k, v in formatting_evidence.items() if k != "total_content_lines"
     }
 
+    # extraction_result["parsing_issues"] holds ATSParsingIssue Pydantic
+    # instances (from ats_parsing_checker.py, wired in during Step 3).
+    # Convert to plain dicts here -- the smallest safe conversion -- so
+    # ATSEvidence stays a plain-data dataclass and serialize_ats_evidence()
+    # (asdict) / json.dumps() in ai_service.py keep working unchanged.
+    # Missing/empty safely becomes [].
+    parsing_issues = [
+        issue.model_dump() if hasattr(issue, "model_dump") else issue
+        for issue in extraction_result.get("parsing_issues", [])
+    ]
+
     evidence = ATSEvidence(
         **contact_evidence,
         **sections_evidence,
@@ -693,6 +712,7 @@ def compute_ats_score_with_evidence(
         **formatting_evidence_deduped,
         **keywords_evidence,
         **achievements_evidence,
+        parsing_issues=parsing_issues,
     )
 
     return legacy_result, evidence
