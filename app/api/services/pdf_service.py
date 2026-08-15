@@ -1,4 +1,5 @@
 import io
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -6,6 +7,13 @@ import fitz  # PyMuPDF
 import docx
 from PIL import Image
 import pytesseract
+
+from app.api.services.ats_parsing_checker import (
+    check_pdf_parsing_issues,
+    check_docx_parsing_issues,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def is_corrupted_text_content(text: str) -> bool:
@@ -108,6 +116,15 @@ def extract_text_from_pdf(file_input: bytes | Path | str) -> dict[str, Any]:
                        if uri not in extracted_links:
                             extracted_links.append(uri)
 
+            # Deterministic structural ATS evidence, computed on this same
+            # already-open document -- no second fitz.open(). Isolated in
+            # its own boundary so a checker failure never blocks extraction.
+            try:
+                parsing_issues = check_pdf_parsing_issues(doc)
+            except Exception as check_err:
+                logger.info(f"[ATS Parsing Check] PDF check failed: {type(check_err).__name__}")
+                parsing_issues = []
+
             extracted_text = "\n".join(text_content).strip()
             word_count = len(extracted_text.split())
 
@@ -146,6 +163,7 @@ def extract_text_from_pdf(file_input: bytes | Path | str) -> dict[str, Any]:
         "image_count": total_images,
         "page_count": page_count,
         "extracted_links": extracted_links,
+        "parsing_issues": parsing_issues,
     }
 
 
@@ -178,6 +196,15 @@ def extract_text_from_docx(file_input: bytes | Path | str) -> dict[str, Any]:
     except Exception as err:
         raise ValueError(f"Failed to parse DOCX document: {str(err)}") from err
 
+    # Deterministic structural ATS evidence, computed on this same
+    # already-open document -- no second docx.Document(...). Isolated in
+    # its own boundary so a checker failure never blocks extraction.
+    try:
+        parsing_issues = check_docx_parsing_issues(doc)
+    except Exception as check_err:
+        logger.info(f"[ATS Parsing Check] DOCX check failed: {type(check_err).__name__}")
+        parsing_issues = []
+
     extracted_text = "\n".join(paragraphs).strip()
     word_count = len(extracted_text.split())
 
@@ -197,6 +224,7 @@ def extract_text_from_docx(file_input: bytes | Path | str) -> dict[str, Any]:
         "image_count": 0,
         "page_count": 1,
         "extracted_links": extracted_links,
+        "parsing_issues": parsing_issues,
     }
 
 
@@ -219,4 +247,3 @@ def extract_text_from_file(file_input: bytes | Path | str, filename: str = "") -
         return extract_text_from_txt(file_input)
     else:
         raise ValueError(f"Unsupported file format: '{suffix}'. Supported formats: .pdf, .docx, .txt")
-    

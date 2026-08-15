@@ -387,6 +387,8 @@ async def analyze_resume(
             "breakdown": ats_result["breakdown"],
             "reason_not_higher": ats_result["reason"],
             "explanation": ats_explanation,
+            "parsing_issues": extracted_result.get("parsing_issues", [])
+                if isinstance(extracted_result, dict) else [],
         }
         if isinstance(analysis_dict.get("explainable_scorecard"), dict):
             analysis_dict["explainable_scorecard"]["ats_score"] = ats_score_payload
