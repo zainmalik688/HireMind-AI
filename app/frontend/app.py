@@ -59,6 +59,7 @@ st.markdown(
         /* Confidence Badges */
         .badge-conf-high { background-color: #0c5460; color: #d1ecf1; padding: 4px 10px; border-radius: 4px; font-weight: 600; font-size: 0.88rem; float: right; }
         .badge-conf-med { background-color: #383d41; color: #e2e3e5; padding: 4px 10px; border-radius: 4px; font-weight: 600; font-size: 0.88rem; float: right; }
+        .badge-conf-low { background-color: transparent; color: #8a919b; padding: 3px 9px; border: 1px solid #454b54; border-radius: 4px; font-weight: 600; font-size: 0.88rem; float: right; }
 
         .stTabs [data-baseweb="tab"] {
             height: 55px;
@@ -924,6 +925,58 @@ if st.session_state.get("active_audit"):
                     st.write(f"- {safe_str(imp, '')}")
         else:
             st.info("Detailed ATS explanation is not available for this analysis.")
+
+        st.markdown("### ATS Parsing Issues")
+        # Renderer only: parsing_issues is deterministic structural evidence
+        # produced upstream by ats_parsing_checker.py and carried through
+        # unchanged in ats_score_payload (main.py). This block does not
+        # detect, infer, or invent anything -- it only displays what the
+        # backend already supplied on ATSScoreItem.parsing_issues.
+        parsing_issues = safe_list(ats_obj.get("parsing_issues"))
+        rendered_any = False
+        for raw_issue in parsing_issues:
+            issue = safe_dict(raw_issue)
+            if not issue:
+                continue
+
+            issue_type_label = safe_str(issue.get("issue_type"), "Unknown Issue").replace("_", " ").title()
+
+            severity = safe_str(issue.get("severity"), "medium").lower()
+            severity_class = severity if severity in ("critical", "high", "moderate", "medium", "minor", "low") else "medium"
+
+            confidence = safe_str(issue.get("confidence"), "medium").lower()
+            if confidence == "high":
+                conf_class, conf_label = "badge-conf-high", "High"
+            elif confidence == "low":
+                conf_class, conf_label = "badge-conf-low", "Low"
+            else:
+                conf_class, conf_label = "badge-conf-med", "Medium"
+
+            affected_pages = [p for p in safe_list(issue.get("affected_pages")) if isinstance(p, int)]
+            pages_text = ", ".join(str(p) for p in sorted(set(affected_pages))) if affected_pages else "Not available"
+
+            description = safe_str(issue.get("description"), "No description provided.")
+
+            st.markdown(
+                f"""
+                <div class="card-box">
+                    <span class="badge-{severity_class}">{severity.upper()} SEVERITY</span>
+                    <span class="{conf_class}">🔍 {conf_label} Confidence</span><br><br>
+                    <b>{issue_type_label}</b><br>
+                    <small style="color: #B0BEC5;"><b>Pages:</b> {pages_text}</small><br>
+                    {description}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            rendered_any = True
+
+        if not rendered_any:
+            st.success("✅ No ATS parsing issues detected.")
+            st.caption(
+                "No deterministic parsing issues were supplied by this evidence pipeline. "
+                "This does not confirm the document is fully ATS-compatible."
+            )
 
         st.markdown("### Structure & Scan Speed Review")
         struct = safe_dict(data.get("resume_structure_review"))
