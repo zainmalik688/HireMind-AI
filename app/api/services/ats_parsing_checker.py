@@ -104,9 +104,34 @@ def check_pdf_page_issues(fitz_page, page_number: int | None = None) -> list[ATS
     affected_pages is left as None in that case.
     """
     issues = []
-    blocks = [b for b in fitz_page.get_text("blocks") if b[4].strip()]
     affected_pages = [page_number] if page_number is not None else None
 
+    # PDF-native table evidence based on detected ruling/grid lines.
+    # strategy="lines_strict" only considers actual drawn lines, so a
+    # borderless fill or a lone decorative rule is unlikely to register --
+    # this is detection evidence, not semantic proof a table exists (or,
+    # on failure, proof one doesn't).
+    #
+    # find_tables() is a large third-party algorithm (ported from
+    # pdfplumber) with no single documented exception type: it explicitly
+    # raises ValueError/IndexError from its own geometry math, and can
+    # also propagate whatever the underlying content-stream parsing
+    # raises. Broad but narrowly scoped to this call only -- the same
+    # pattern pdf_service.py already uses around the whole parsing-issue
+    # check.
+    has_table = False
+    try:
+        has_table = bool(fitz_page.find_tables(strategy="lines_strict").tables)
+    except Exception:
+        has_table = False  # no reliable TABLE evidence -- not proof of absence
+    if has_table:
+        issues.append(ATSParsingIssue(
+            issue_type="TABLE", severity="high", confidence="high",
+            affected_pages=affected_pages,
+            description=DESCRIPTIONS["TABLE"]
+        ))
+
+    blocks = [b for b in fitz_page.get_text("blocks") if b[4].strip()]
     if _count_real_columns(blocks, fitz_page.rect.height) >= 2:
         issues.append(ATSParsingIssue(
             issue_type="MULTI_COLUMN", severity="medium", confidence="medium",
