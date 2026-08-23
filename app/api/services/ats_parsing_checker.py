@@ -1,4 +1,5 @@
 import re
+from docx.oxml.ns import qn
 from app.api.schemas import ATSParsingIssue
 
 # --- Config: isolated here so thresholds can be tuned without touching logic ---
@@ -30,6 +31,11 @@ DESCRIPTIONS = {
     "NONSTANDARD_BULLETS": "Icon or symbol bullets detected — these may render as garbled characters in some ATS.",
 }
 
+# Known icon/dingbat font families whose characters only make visual sense
+# inside that font (arrows, checkmarks, stars, etc). Word's own default
+# bullet uses the Symbol font and is intentionally NOT in this list.
+NONSTANDARD_BULLET_FONTS = {"Wingdings", "Wingdings 2", "Wingdings 3", "Webdings", "Marlett"}
+
 
 def _has_contact_info(text: str) -> bool:
     if EMAIL_PATTERN.search(text):
@@ -38,6 +44,33 @@ def _has_contact_info(text: str) -> bool:
         if sum(c.isdigit() for c in candidate) >= MIN_DIGITS_FOR_PHONE:
             return True
     return False
+
+
+def _bullet_font(paragraph, numbering) -> tuple[str | None, str | None]:
+    """Resolves a paragraph's OOXML bullet level to (numFmt, font).
+    Falls back to the paragraph's style numPr since Word's built-in
+    List Bullet/List Number styles carry numPr on the style, not the paragraph.
+    """
+    numPr = paragraph._p.pPr.numPr if paragraph._p.pPr is not None else None
+    if numPr is None:
+        style_pPr = paragraph.style.element.find(qn('w:pPr'))
+        numPr = style_pPr.find(qn('w:numPr')) if style_pPr is not None else None
+    if numPr is None or numPr.numId is None:
+        return None, None
+
+    ilvl = numPr.ilvl.val if numPr.ilvl is not None else 0
+    num = numbering.find(f'{qn("w:num")}[@{qn("w:numId")}="{numPr.numId.val}"]')
+    abstract_id = num.find(qn('w:abstractNumId')).get(qn('w:val')) if num is not None else None
+    lvl = (num.find(f'{qn("w:lvlOverride")}[@{qn("w:ilvl")}="{ilvl}"]/{qn("w:lvl")}')
+           or numbering.find(f'{qn("w:abstractNum")}[@{qn("w:abstractNumId")}="{abstract_id}"]'
+                              f'/{qn("w:lvl")}[@{qn("w:ilvl")}="{ilvl}"]')) if abstract_id else None
+    if lvl is None:
+        return None, None
+
+    fmt_el = lvl.find(qn('w:numFmt'))
+    rFonts = lvl.find(f'{qn("w:rPr")}/{qn("w:rFonts")}')
+    font = (rFonts.get(qn('w:ascii')) or rFonts.get(qn('w:hAnsi'))) if rFonts is not None else None
+    return (fmt_el.get(qn('w:val')) if fmt_el is not None else None), font
 
 
 def check_docx_parsing_issues(doc) -> list[ATSParsingIssue]:
@@ -63,6 +96,38 @@ def check_docx_parsing_issues(doc) -> list[ATSParsingIssue]:
         issues.append(ATSParsingIssue(
             issue_type="TEXT_BOX", severity="high", confidence="high",
             description=DESCRIPTIONS["TEXT_BOX"]
+        ))
+
+    # w:cols/w:num is the literal OOXML column count Word writes for
+    # Format > Columns -- an explicit structural fact, not inferred layout.
+    has_multi_column = False
+    for s in doc.sections:
+        cols = s._sectPr.find(qn('w:cols'))
+        if cols is not None and int(cols.get(qn('w:num'), 1)) >= 2:
+            has_multi_column = True
+            break
+
+    if has_multi_column:
+        issues.append(ATSParsingIssue(
+            issue_type="MULTI_COLUMN", severity="medium", confidence="high",
+            description=DESCRIPTIONS["MULTI_COLUMN"]
+        ))
+
+    # A bullet is only "nonstandard" when its OOXML numbering level uses an
+    # icon/dingbat font (Wingdings, Webdings, etc). Word's default Symbol-
+    # font bullet, and any bullet with no font override, are left alone.
+    numbering = doc.part.numbering_part.element
+    has_nonstandard_bullets = False
+    for paragraph in doc.paragraphs:
+        fmt, font = _bullet_font(paragraph, numbering)
+        if fmt == "bullet" and font in NONSTANDARD_BULLET_FONTS:
+            has_nonstandard_bullets = True
+            break
+
+    if has_nonstandard_bullets:
+        issues.append(ATSParsingIssue(
+            issue_type="NONSTANDARD_BULLETS", severity="low", confidence="medium",
+            description=DESCRIPTIONS["NONSTANDARD_BULLETS"]
         ))
 
     return issues
