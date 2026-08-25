@@ -4,7 +4,7 @@ from app.api.schemas import ATSParsingIssue
 
 # --- Config: isolated here so thresholds can be tuned without touching logic ---
 MIN_BLOCKS_PER_COLUMN = 3
-MIN_COLUMN_HEIGHT_RATIO = 0.25
+MIN_COLUMN_HEIGHT_RATIO = 0.24
 X_CLUSTER_TOLERANCE = 25
 MIN_DIGITS_FOR_PHONE = 7
 
