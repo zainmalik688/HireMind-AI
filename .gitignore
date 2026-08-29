@@ -4,3 +4,4 @@ __pycache__/
 cached_audits/
 .aider*
 audit_logs/
+document/ 
