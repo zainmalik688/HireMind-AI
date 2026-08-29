@@ -21,6 +21,15 @@ PHONE_CANDIDATE_PATTERN = re.compile(r'\+?[\d\s\-()]{8,}')
 MIDDOT_LINE_START_PATTERN = re.compile(r'^[ \t]*·', re.MULTILINE)
 MIN_MIDDOT_BULLET_LINES = 2
 
+# PDF header/footer margin bands, as a ratio of page height, that a text
+# block's y-range must fall within to be considered for HEADER_FOOTER_TEXT.
+# Mirrors the DOCX detector's semantics (_has_contact_info) rather than a
+# bare presence/length heuristic, to avoid flagging ordinary body text
+# (e.g. a candidate's name/contact line) that legitimately sits near the
+# top of page 1.
+TOP_REGION_RATIO = 0.12
+BOTTOM_REGION_RATIO = 0.12
+
 # Approved, conservative descriptions (Step 2 - Change 3). These state the
 # structural fact the detector can actually prove, not universal ATS behavior.
 DESCRIPTIONS = {
@@ -160,6 +169,30 @@ def _count_real_columns(blocks: list, page_height: float) -> int:
     return real_columns
 
 
+def _detect_header_footer_text(blocks: list, page_height: float) -> bool:
+    """Checks whether contact info (email/phone) appears in a text block
+    positioned inside the top or bottom margin band of the page.
+
+    Reuses the same blocks list already extracted for the MULTI_COLUMN
+    check (no second get_text("blocks") call). Gated on _has_contact_info,
+    matching the DOCX detector's semantics, rather than a bare
+    presence/length heuristic -- this is what keeps false positives low
+    on ordinary single-page resumes whose top region legitimately
+    contains the candidate's own contact line as body content.
+    """
+    if not page_height:
+        return False  # degenerate page geometry -- no reliable region, fail safe to no issue
+
+    top_bound = page_height * TOP_REGION_RATIO
+    bottom_bound = page_height * (1 - BOTTOM_REGION_RATIO)
+
+    margin_text = "\n".join(
+        b[4] for b in blocks
+        if b[1] <= top_bound or b[3] >= bottom_bound
+    )
+    return _has_contact_info(margin_text)
+
+
 def check_pdf_page_issues(fitz_page, page_number: int | None = None) -> list[ATSParsingIssue]:
     """Checks a single page. Caller aggregates across all pages.
 
@@ -202,6 +235,13 @@ def check_pdf_page_issues(fitz_page, page_number: int | None = None) -> list[ATS
             issue_type="MULTI_COLUMN", severity="medium", confidence="medium",
             affected_pages=affected_pages,
             description=DESCRIPTIONS["MULTI_COLUMN"]
+        ))
+
+    if _detect_header_footer_text(blocks, fitz_page.rect.height):
+        issues.append(ATSParsingIssue(
+            issue_type="HEADER_FOOTER_TEXT", severity="high", confidence="high",
+            affected_pages=affected_pages,
+            description=DESCRIPTIONS["HEADER_FOOTER_TEXT"]
         ))
 
     page_text = fitz_page.get_text()
