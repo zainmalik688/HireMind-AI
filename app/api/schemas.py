@@ -98,6 +98,24 @@ class ParsedResumeData(BaseModel):
 
 
 # ==========================================
+# JOB DESCRIPTION UNDERSTANDING SCHEMAS
+# ==========================================
+
+class Requirement(BaseModel):
+    text: str = Field(..., description="The extracted requirement, e.g. 'Python'")
+    source_text: str = Field(..., description="The exact JD sentence/phrase this requirement was drawn from")
+
+class ParsedJobDescription(BaseModel):
+    job_title: str | None = None
+    required_skills: list[Requirement] = Field(default_factory=list)
+    preferred_skills: list[Requirement] = Field(default_factory=list)
+    required_experience: list[Requirement] = Field(default_factory=list)
+    preferred_experience: list[Requirement] = Field(default_factory=list)
+    education_requirements: list[Requirement] = Field(default_factory=list)
+    other_requirements: list[str] = Field(default_factory=list)
+
+
+# ==========================================
 # RECRUITER V3 ENGINE RESPONSE SCHEMAS
 # ==========================================
 
