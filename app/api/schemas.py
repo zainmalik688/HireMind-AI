@@ -114,6 +114,9 @@ class ParsedJobDescription(BaseModel):
     education_requirements: list[Requirement] = Field(default_factory=list)
     other_requirements: list[str] = Field(default_factory=list)
 
+class JDParseRequest(BaseModel):
+    jd_text: str
+
 
 # ==========================================
 # RECRUITER V3 ENGINE RESPONSE SCHEMAS

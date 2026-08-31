@@ -29,11 +29,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 
 # V2 Schemas & Services
-from app.api.schemas import ParsedResumeData, AuditReportResponse
+from app.api.schemas import ParsedResumeData, AuditReportResponse, JDParseRequest, ParsedJobDescription
 from app.api.services.validation_service import DocumentValidationService, MAX_FILE_SIZE_MB
 from app.api.services.parsing_service import ResumeParsingEngine
 from app.api.services.extractor import EntityExtractor
 from app.api.services.classifier_service import ResumeClassifierService
+from app.api.services.jd_service import extract_job_description
 from app.api.services.ats_scoring_engine import compute_ats_score_with_evidence, serialize_ats_evidence, StaticKeywordProvider
 from app.api.utils.text_cleaner import TextCleaner
 
@@ -178,6 +179,29 @@ async def parse_resume(file: UploadFile = File(...)):
     response_dict["classification"] = classification_results
 
     return response_dict
+
+
+# --- JD UNDERSTANDING ENDPOINT ---
+
+@app.post(
+    "/api/v1/parse-jd",
+    response_model=ParsedJobDescription,
+    tags=["JD Understanding"]
+)
+async def parse_jd(request: JDParseRequest):
+    """
+    Accepts raw job description text and returns a structured, evidence-
+    verified ParsedJobDescription. All extraction, Gemini structured
+    output, and source_text evidence filtering are handled internally by
+    extract_job_description(), which always fails safely.
+    """
+    if not request.jd_text or not request.jd_text.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="jd_text must not be empty."
+        )
+
+    return await extract_job_description(request.jd_text)
 
 
 # --- VERSION 3 ANALYSIS ENDPOINT ---
