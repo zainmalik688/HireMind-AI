@@ -1,10 +1,11 @@
 """
-Job Description Understanding - section detection layer (Chunk 2).
+Job Description Understanding.
 
-This module only splits raw JD text into category-labeled text blocks so a
-later step (Chunk 3) can feed structured hints into Gemini extraction.
-It does not extract requirements, call any AI service, or produce a
-ParsedJobDescription -- that is out of scope for this chunk.
+Contains three layers built incrementally:
+- Chunk 2: detect_jd_sections() -- rule-based JD section splitting.
+- Chunk 3: extract_job_description() -- Gemini structured extraction.
+- Chunk 3.5: deterministic source_text evidence validation, applied
+  inside extract_job_description() before it returns.
 """
 
 # Known JD heading text (already normalized to uppercase, no trailing colon)
@@ -79,7 +80,7 @@ import asyncio
 from google import genai
 from google.genai import types
 
-from app.api.schemas import ParsedJobDescription
+from app.api.schemas import ParsedJobDescription, Requirement
 
 # Follows the same GEMINI_MODEL convention as ai_service.py -- never hardcode
 # the model name here.
@@ -165,7 +166,41 @@ async def extract_job_description(jd_text: str) -> ParsedJobDescription:
         except json.JSONDecodeError:
             parsed_dict = json.loads(_clean_json_string(raw_text))
 
-        return ParsedJobDescription.model_validate(parsed_dict)
+        parsed = ParsedJobDescription.model_validate(parsed_dict)
+
+        # Chunk 3.5 — evidence validation. Guarantees only that each
+        # source_text exists in the original JD (after case/whitespace
+        # normalization). It does NOT guarantee Gemini understood the
+        # requirement correctly, that text accurately summarizes
+        # source_text, that required/preferred classification is right,
+        # or that every JD requirement was extracted.
+        parsed.required_skills = _filter_verified_requirements(parsed.required_skills, jd_text)
+        parsed.preferred_skills = _filter_verified_requirements(parsed.preferred_skills, jd_text)
+        parsed.required_experience = _filter_verified_requirements(parsed.required_experience, jd_text)
+        parsed.preferred_experience = _filter_verified_requirements(parsed.preferred_experience, jd_text)
+        parsed.education_requirements = _filter_verified_requirements(parsed.education_requirements, jd_text)
+
+        return parsed
 
     except Exception:
         return ParsedJobDescription()
+
+
+# ==========================================
+# CHUNK 3.5 — DETERMINISTIC EVIDENCE VALIDATION
+# ==========================================
+
+def _normalize_for_match(s: str) -> str:
+    """Lowercase + collapse whitespace, so trivial formatting differences
+    don't cause a real quote to fail verification."""
+    return " ".join(s.lower().split())
+
+
+def _filter_verified_requirements(reqs: list[Requirement], jd_text: str) -> list[Requirement]:
+    """
+    Keeps only requirements whose source_text is an actual (normalized)
+    substring of the original JD text. Drops anything that cannot be found
+    -- silently, since this is a trust filter, not a classification check.
+    """
+    normalized_jd = _normalize_for_match(jd_text)
+    return [r for r in reqs if _normalize_for_match(r.source_text) in normalized_jd]
