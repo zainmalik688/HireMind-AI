@@ -119,6 +119,41 @@ class JDParseRequest(BaseModel):
 
 
 # ==========================================
+# REQUIREMENT MATCHING SCHEMAS
+# ==========================================
+
+MatchStatus = Literal["MATCH", "PARTIAL", "MISSING"]
+
+class MatchResult(BaseModel):
+    """
+    One JD requirement evaluated against the resume.
+
+    Produced by any MatchingEngine implementation (see matching_engine.py).
+    The first implementation is deterministic/lexical; if a semantic
+    fallback is added later for MISSING cases, it must populate this same
+    schema -- no schema change implied by that future step.
+    """
+    requirement_text: str = Field(..., description="The requirement being matched, e.g. 'Python'.")
+    requirement_source_text: str = Field(..., description="Exact JD sentence/phrase this requirement was drawn from (mirrors Requirement.source_text).")
+    status: MatchStatus = Field(..., description="MATCH, PARTIAL, or MISSING.")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Matcher's confidence in this classification.")
+    resume_evidence_text: str | None = Field(None, description="Exact resume text supporting the match. Required for MATCH/PARTIAL; must be omitted for MISSING.")
+    resume_section: str | None = Field(None, description="Resume section the evidence was found in (e.g. 'skills', 'experience'), when known.")
+    reason: str = Field(..., description="Plain-language explanation for the status.")
+
+    @model_validator(mode="after")
+    def _evidence_matches_status(self) -> "MatchResult":
+        """Mirrors the evidence-grounding rule used elsewhere in this project (e.g.
+        ai_service.py's grounding mandate, JD Chunk 3.5's source_text verification):
+        a claimed match must carry evidence; a MISSING must not fabricate any."""
+        if self.status == "MISSING" and self.resume_evidence_text:
+            raise ValueError("MISSING match must not carry resume_evidence_text.")
+        if self.status in ("MATCH", "PARTIAL") and not self.resume_evidence_text:
+            raise ValueError(f"{self.status} match requires resume_evidence_text.")
+        return self
+
+
+# ==========================================
 # RECRUITER V3 ENGINE RESPONSE SCHEMAS
 # ==========================================
 
