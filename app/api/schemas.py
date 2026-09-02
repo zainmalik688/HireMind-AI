@@ -122,6 +122,38 @@ class JDParseRequest(BaseModel):
 # REQUIREMENT MATCHING SCHEMAS
 # ==========================================
 
+class ResumeSection(BaseModel):
+    """One resume section's text with its label as extracted.
+
+    `name` is deliberately free-form, not a fixed domain-specific enum --
+    section names and structure vary by field (e.g. 'clinical experience'
+    for healthcare, 'campaigns' for marketing), and a closed enum would
+    itself be a domain-coupling mistake.
+    """
+    name: str = Field(..., description="Section label as extracted, e.g. 'experience', 'education', 'certifications'.")
+    text: str = Field(..., description="The section's text content.")
+
+class NormalizedResume(BaseModel):
+    """
+    A stable, extractor-agnostic view of resume content for matching.
+
+    MatchingEngine depends only on this schema, never on
+    EntityExtractor.parse_all()'s internal dict shape (skills/
+    work_experience/bullets/...). Any current or future resume parser
+    can populate this schema via its own adapter function (see
+    resume_normalizer.py) without changing MatchingEngine or any
+    MatchingEngine implementation.
+    """
+    full_text: str = Field(..., description="Full resume text -- final matching fallback.")
+    skill_terms: list[str] = Field(
+        default_factory=list,
+        description="Flat list of discrete named competencies/tools/credentials extracted from the resume, when available. Domain-independent by construction -- every field has some enumerable skills/competencies concept, not only software.",
+    )
+    sections: list[ResumeSection] = Field(
+        default_factory=list,
+        description="Other resume sections (experience, education, projects, certifications, summary, ...) with their text, for location-aware evidence.",
+    )
+
 MatchStatus = Literal["MATCH", "PARTIAL", "MISSING"]
 
 class MatchResult(BaseModel):
