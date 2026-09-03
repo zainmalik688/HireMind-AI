@@ -190,9 +190,26 @@ async def extract_job_description(jd_text: str) -> ParsedJobDescription:
 # CHUNK 3.5 — DETERMINISTIC EVIDENCE VALIDATION
 # ==========================================
 
+# Narrow, deterministic map of common Unicode punctuation variants to their
+# ASCII equivalents. Applied before lowercasing/whitespace collapse so that
+# e.g. a curly apostrophe in Gemini's source_text still matches a straight
+# apostrophe in the original JD (or vice versa). Intentionally small and
+# explicit -- this is not a general Unicode-folding system.
+_PUNCTUATION_NORMALIZATION_MAP: dict[str, str] = {
+    "\u2019": "'",  # RIGHT SINGLE QUOTATION MARK (curly apostrophe)
+    "\u2018": "'",  # LEFT SINGLE QUOTATION MARK
+    "\u02bc": "'",  # MODIFIER LETTER APOSTROPHE
+    "\u201c": '"',  # LEFT DOUBLE QUOTATION MARK
+    "\u201d": '"',  # RIGHT DOUBLE QUOTATION MARK
+}
+_PUNCTUATION_TRANSLATION_TABLE = str.maketrans(_PUNCTUATION_NORMALIZATION_MAP)
+
+
 def _normalize_for_match(s: str) -> str:
-    """Lowercase + collapse whitespace, so trivial formatting differences
+    """Normalize common Unicode punctuation variants to ASCII, then
+    lowercase + collapse whitespace, so trivial formatting differences
     don't cause a real quote to fail verification."""
+    s = s.translate(_PUNCTUATION_TRANSLATION_TABLE)
     return " ".join(s.lower().split())
 
 
@@ -201,6 +218,21 @@ def _filter_verified_requirements(reqs: list[Requirement], jd_text: str) -> list
     Keeps only requirements whose source_text is an actual (normalized)
     substring of the original JD text. Drops anything that cannot be found
     -- silently, since this is a trust filter, not a classification check.
+
+    Also drops requirements with empty/whitespace-only source_text or
+    text: an empty source_text would otherwise trivially "match" any JD
+    (since "" is a substring of everything), and an empty/whitespace-only
+    requirement text is not a meaningful requirement regardless of
+    whether its source_text happens to verify.
     """
     normalized_jd = _normalize_for_match(jd_text)
-    return [r for r in reqs if _normalize_for_match(r.source_text) in normalized_jd]
+    verified = []
+    for r in reqs:
+        normalized_source = _normalize_for_match(r.source_text)
+        if not normalized_source:
+            continue
+        if not r.text or not r.text.strip():
+            continue
+        if normalized_source in normalized_jd:
+            verified.append(r)
+    return verified
