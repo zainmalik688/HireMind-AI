@@ -83,7 +83,7 @@ skill requirements aren't realistic.
 import re
 from typing import Any, Protocol
 
-from schemas import MatchResult, NormalizedResume, ParsedJobDescription, Requirement
+from app.api.schemas import MatchResult, NormalizedResume, ParsedJobDescription, Requirement
 
 # ---------------------------------------------------------------------------
 # Alias provider abstraction (dependency injection) -- mirrors

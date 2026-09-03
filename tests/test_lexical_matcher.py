@@ -8,11 +8,11 @@ output, exactly as the existing test files in this project do
 (test_ats_parsing_checker.py, test_parsing.py).
 """
 
-from schemas import NormalizedResume, ParsedJobDescription, Requirement, ResumeSection
-from lexical_matcher import LexicalMatcher, StaticAliasProvider
-from matching_engine import MatchingEngine
-from resume_normalizer import normalize_resume_entities
-from extractor import EntityExtractor
+from app.api.schemas import NormalizedResume, ParsedJobDescription, Requirement, ResumeSection
+from app.api.services.lexical_matcher import LexicalMatcher, StaticAliasProvider
+from app.api.services.matching_engine import MatchingEngine
+from app.api.services.resume_normalizer import normalize_resume_entities
+from app.api.services.extractor import EntityExtractor
 
 
 def _req(text: str, source_text: str) -> Requirement:

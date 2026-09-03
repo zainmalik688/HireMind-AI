@@ -35,7 +35,7 @@ without requiring a change anywhere downstream.
 
 from typing import Any
 
-from schemas import NormalizedResume, ResumeSection
+from app.api.schemas import NormalizedResume, ResumeSection
 
 
 def _certification_text(cert: Any) -> str:

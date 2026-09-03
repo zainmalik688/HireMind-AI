@@ -20,7 +20,7 @@ no knowledge of that shape.
 
 from typing import Protocol
 
-from schemas import MatchResult, NormalizedResume, ParsedJobDescription
+from app.api.schemas import MatchResult, NormalizedResume, ParsedJobDescription
 
 
 class MatchingEngine(Protocol):
