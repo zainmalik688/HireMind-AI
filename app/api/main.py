@@ -9,6 +9,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 from dotenv import load_dotenv
 load_dotenv()  # Must run before importing services using env vars
 
+import asyncio
 import json
 import fitz
 import time
@@ -361,15 +362,44 @@ async def analyze_resume(
                 ),
             )
 
-        # Execute Gemini Recruiter Intelligence Audit
+        # Deterministic ATS scoring first: explain_ats_result() needs its
+        # output, and it has no dependency on the Gemini audit call below,
+        # so computing it here lets both Gemini calls start together.
         _t0 = time.perf_counter()
-
-        raw_analysis = await analyze_resume_text(
+        ats_result, ats_evidence = compute_ats_score_with_evidence(
             text=extracted_text,
-            target_role=target_role
+            entities=extracted_entities,
+            extraction_result=extracted_result if isinstance(extracted_result, dict) else {},
+            keyword_provider=StaticKeywordProvider(EntityExtractor.SKILLS_DB),
+            target_role=target_role,
         )
+        _perf("ATS Engine", _t0)
 
-        _perf("Gemini API", _t0)
+        # Execute the Gemini Recruiter Intelligence Audit and the ATS
+        # explanation concurrently -- neither depends on the other's output.
+        # return_exceptions=True is required: without it, one task failing
+        # would cancel/discard the other's result, turning a non-fatal
+        # explanation failure into a lost audit.
+        _t0 = time.perf_counter()
+        raw_analysis, ats_explanation = await asyncio.gather(
+            analyze_resume_text(text=extracted_text, target_role=target_role),
+            explain_ats_result(
+                score=ats_result["score"],
+                breakdown=ats_result["breakdown"],
+                evidence=serialize_ats_evidence(ats_evidence),
+            ),
+            return_exceptions=True,
+        )
+        _perf("Gemini API + ATS Explanation (concurrent)", _t0)
+
+        # Audit failure remains fatal, same as before.
+        if isinstance(raw_analysis, Exception):
+            raise raw_analysis
+
+        # ATS explanation failure remains non-fatal, same as before.
+        if isinstance(ats_explanation, Exception):
+            logger.info(f"[ATS Explanation] failed: {type(ats_explanation).__name__}")
+            ats_explanation = None
 
         # Parse return payload cleanly into native JSON dict
         if isinstance(raw_analysis, str):
@@ -384,27 +414,6 @@ async def analyze_resume(
             raise ValueError(
                 "AI Service returned an unexpected payload shape (expected a JSON object)."
             )
-        _t0 = time.perf_counter()
-        ats_result, ats_evidence = compute_ats_score_with_evidence(
-            text=extracted_text,
-            entities=extracted_entities,
-            extraction_result=extracted_result if isinstance(extracted_result, dict) else {},
-            keyword_provider=StaticKeywordProvider(EntityExtractor.SKILLS_DB),
-            target_role=target_role,
-        )
-        _perf("ATS Engine", _t0)
-
-        _t0 = time.perf_counter()
-        try:
-            ats_explanation = await explain_ats_result(
-                score=ats_result["score"],
-                breakdown=ats_result["breakdown"],
-                evidence=serialize_ats_evidence(ats_evidence),
-            )
-        except Exception as explain_err:
-            logger.info(f"[ATS Explanation] failed: {type(explain_err).__name__}")
-            ats_explanation = None
-        _perf("ATS Explanation", _t0)
 
         ats_score_payload = {
             "score": ats_result["score"],
